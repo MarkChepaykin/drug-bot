@@ -132,13 +132,8 @@ class Jester(commands.Cog):
             print(f"[jester] +{len(lines)} реплик")
 
     async def _maybe_joke(self, session: JesterSession):
-        if not session.transcript:
-            return
-        if time.monotonic() - session.last_joke < config.JOKE_INTERVAL:
-            return
-        session.last_joke = time.monotonic()
-        if random.random() <= config.JOKE_CHANCE:
-            await self._tell_joke(session)
+        # ВРЕМЕННО (дебаг): шутить после каждого окна, без таймера/рандома/транскрипта
+        await self._tell_joke(session)
 
     async def _tell_joke(self, session: JesterSession):
         joke = await llm.make_joke(session.recent_text() or "Разговор только начался.")
