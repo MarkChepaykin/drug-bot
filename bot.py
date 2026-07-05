@@ -16,7 +16,7 @@ if not discord.opus.is_loaded():
             break
         except Exception:
             pass
-keepalive.VERSION = f"v3 opus={int(discord.opus.is_loaded())}"
+keepalive.VERSION += f" opus={int(discord.opus.is_loaded())}"
 
 intents = discord.Intents.default()
 intents.message_content = True

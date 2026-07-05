@@ -15,6 +15,6 @@ STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ru")
 TTS_VOICE = os.getenv("TTS_VOICE", "ru-RU-DmitryNeural")
 
 WINDOW_SECONDS = int(os.getenv("WINDOW_SECONDS", "10"))
-JOKE_INTERVAL = int(os.getenv("JOKE_INTERVAL", "180"))
+JOKE_INTERVAL = int(os.getenv("JOKE_INTERVAL", "45"))
 JOKE_CHANCE = float(os.getenv("JOKE_CHANCE", "0.7"))
 TRANSCRIPT_MAX_LINES = int(os.getenv("TRANSCRIPT_MAX_LINES", "40"))

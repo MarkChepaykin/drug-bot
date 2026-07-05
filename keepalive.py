@@ -5,7 +5,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
-VERSION = "v3"
+VERSION = "v4"
 status = "starting"
 
 
