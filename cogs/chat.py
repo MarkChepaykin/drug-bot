@@ -1,3 +1,4 @@
+import re
 from collections import defaultdict, deque
 
 import discord
@@ -23,7 +24,11 @@ class Chat(commands.Cog):
             return  # пока бот в войсе, в этом канале отвечает голосом Jester
         me = message.guild.me if message.guild else None
         bot_roles = [r for r in me.roles if r.managed] if me else []
-        mentioned = self.bot.user in message.mentions or any(r in message.role_mentions for r in bot_roles)
+        mentioned = (
+            self.bot.user in message.mentions
+            or any(r in message.role_mentions for r in bot_roles)
+            or re.search(r"\bдруг\b", message.content.lower()) is not None
+        )
         if not mentioned:
             return
         content = message.content
