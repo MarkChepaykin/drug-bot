@@ -95,7 +95,13 @@ class Jester(commands.Cog):
                 await self._record_window(session)
                 await self._maybe_joke(session)
             except Exception as e:
-                print(f"[jester] loop error: {e}")
+                print(f"[jester] loop error: {e!r}")
+                if time.monotonic() - getattr(session, "last_err", 0) > 60:
+                    session.last_err = time.monotonic()
+                    try:
+                        await session.text_channel.send(f"⚠️ Цикл прослушки упал: `{type(e).__name__}: {e}`")
+                    except Exception:
+                        pass
                 await asyncio.sleep(2)
 
     async def _record_window(self, session: JesterSession):

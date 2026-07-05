@@ -9,6 +9,15 @@ import keepalive
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("discord.gateway").setLevel(logging.DEBUG)
 
+if not discord.opus.is_loaded():
+    for _name in ("opus", "libopus.so.0", "libopus.so"):
+        try:
+            discord.opus.load_opus(_name)
+            break
+        except Exception:
+            pass
+keepalive.VERSION = f"v3 opus={int(discord.opus.is_loaded())}"
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
