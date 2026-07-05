@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import tempfile
 import time
 from collections import deque
@@ -16,6 +17,12 @@ from services import llm, tts
 # на сообщения в канале, откуда его позвали, и подшучивает по теме беседы.
 
 
+# Сколько секунд тишины ждать перед репликой, когда говорят несколько человек.
+QUIET_SECONDS = 8
+# Автор считается активным участником, если писал в последние N секунд.
+ACTIVE_WINDOW = 60
+
+
 class JesterSession:
     def __init__(self, voice_client, text_channel, voice_key):
         self.vc = voice_client
@@ -24,8 +31,10 @@ class JesterSession:
         self.active = True
         self.last_err = 0.0
         self.history = deque(maxlen=12)
-        self.fresh_lines = 0
         self.speak_lock = asyncio.Lock()
+        self.authors: dict[int, float] = {}
+        self.last_msg_time = 0.0
+        self.pending: asyncio.Task | None = None
 
 
 class VoiceSelect(discord.ui.Select):
@@ -80,7 +89,6 @@ class Jester(commands.Cog):
         await ctx.followup.send(
             f"Зашёл в **{channel.name}**. Пиши мне в этот канал — отвечу голосом 🎤"
         )
-        self.bot.loop.create_task(self._session_loop(ctx.guild.id))
 
     @discord.slash_command(description="Выйти из голосового канала")
     async def leave(self, ctx: discord.ApplicationContext):
@@ -89,6 +97,8 @@ class Jester(commands.Cog):
             await ctx.respond("Меня и так нет в войсе.", ephemeral=True)
             return
         session.active = False
+        if session.pending:
+            session.pending.cancel()
         await session.vc.disconnect()
         await ctx.respond("Вышел. 👋")
 
@@ -120,37 +130,43 @@ class Jester(commands.Cog):
         content = message.clean_content.strip()
         if not content:
             return
+        now = time.monotonic()
         session.history.append(
             {"role": "user", "content": f"{message.author.display_name}: {content}"}
         )
-        session.fresh_lines += 1
-        try:
-            reply = await llm.voice_chat(list(session.history))
-        except Exception as e:
-            await session.text_channel.send(f"⚠️ Мозг не ответил: `{type(e).__name__}: {e}`")
-            return
-        session.history.append({"role": "assistant", "content": reply})
-        await self._speak(session, reply)
-
-    async def _session_loop(self, guild_id: int):
-        while True:
-            session = self.sessions.get(guild_id)
-            if not session or not session.active:
-                return
+        session.last_msg_time = now
+        session.authors[message.author.id] = now
+        active = sum(1 for t in session.authors.values() if now - t < ACTIVE_WINDOW)
+        direct = (
+            self.bot.user in message.mentions
+            or re.search(r"\bдруг\b", content.lower()) is not None
+        )
+        if direct or active <= 1:
+            # обращение или диалог один на один — отвечаем сразу
+            if session.pending:
+                session.pending.cancel()
+                session.pending = None
             try:
-                await asyncio.sleep(config.JOKE_INTERVAL)
-                if session.fresh_lines:
-                    session.fresh_lines = 0
-                    await self._interject(session)
+                reply = await llm.voice_chat(list(session.history))
             except Exception as e:
-                print(f"[jester] loop error: {e!r}")
-                if time.monotonic() - session.last_err > 60:
-                    session.last_err = time.monotonic()
-                    try:
-                        await session.text_channel.send(f"⚠️ Цикл шуток упал: `{type(e).__name__}: {e}`")
-                    except Exception:
-                        pass
-                await asyncio.sleep(2)
+                await session.text_channel.send(f"⚠️ Мозг не ответил: `{type(e).__name__}: {e}`")
+                return
+            session.history.append({"role": "assistant", "content": reply})
+            await self._speak(session, reply)
+        elif not session.pending or session.pending.done():
+            # оживлённый разговор — ждём тишины и вставляем одну реплику
+            session.pending = self.bot.loop.create_task(self._wait_quiet(session))
+
+    async def _wait_quiet(self, session: JesterSession):
+        try:
+            while time.monotonic() - session.last_msg_time < QUIET_SECONDS:
+                await asyncio.sleep(1)
+            if session.active:
+                await self._interject(session)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[jester] quiet-wait error: {e!r}")
 
     async def _interject(self, session: JesterSession):
         reply = await llm.interject(list(session.history))
