@@ -55,3 +55,19 @@ async def voice_chat(history: list[dict]) -> str:
 
 async def interject(history: list[dict]) -> str:
     return await chat(history or [{"role": "user", "content": "(в канале пока тихо)"}], system=INTERJECT_SYSTEM)
+
+
+GREETING_SYSTEM = PERSONA + (
+    " Ты только что зашёл в голосовой канал к своей компании. Поздоровайся одной короткой "
+    "дерзкой репликой (1-2 предложения), можно сходу подколоть кого-то из присутствующих по имени. "
+    "Каждый раз здоровайся по-разному. Ответ будет озвучен: только устная речь, "
+    "без эмодзи и ремарок в скобках."
+)
+
+
+async def greeting(member_names: list[str]) -> str:
+    who = ", ".join(member_names) if member_names else "никого, пустой канал"
+    return await chat(
+        [{"role": "user", "content": f"В канале сидят: {who}. Ты заходишь — поздоровайся."}],
+        system=GREETING_SYSTEM,
+    )

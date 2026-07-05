@@ -85,10 +85,19 @@ class Jester(commands.Cog):
         except Exception as e:
             await ctx.followup.send(f"Не смог подключиться к голосу ({type(e).__name__}: {e})")
             return
-        self.sessions[ctx.guild.id] = JesterSession(vc, ctx.channel, self.default_voice_key)
+        session = JesterSession(vc, ctx.channel, self.default_voice_key)
+        self.sessions[ctx.guild.id] = session
         await ctx.followup.send(
             f"Зашёл в **{channel.name}**. Пиши мне в этот канал — отвечу голосом 🎤"
         )
+        names = [m.display_name for m in channel.members if not m.bot]
+        try:
+            hello = await llm.greeting(names)
+        except Exception as e:
+            await session.text_channel.send(f"⚠️ Мозг не ответил: `{type(e).__name__}: {e}`")
+            return
+        session.history.append({"role": "assistant", "content": hello})
+        await self._speak(session, hello)
 
     @discord.slash_command(description="Выйти из голосового канала")
     async def leave(self, ctx: discord.ApplicationContext):
