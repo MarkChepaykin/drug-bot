@@ -1,4 +1,7 @@
+import asyncio
+
 import edge_tts
+from gtts import gTTS
 
 import config
 
@@ -12,6 +15,7 @@ VOICES = {
     "Американец 🇺🇸": {"voice": "en-US-AndrewMultilingualNeural"},
     "Немец 🍺": {"voice": "de-DE-FlorianMultilingualNeural"},
     "Француз 🥖": {"voice": "fr-FR-RemyMultilingualNeural"},
+    "Гугл Переводчик 🌐": {"engine": "gtts"},
 }
 
 DEFAULT_VOICE_KEY = "Обычный"
@@ -24,11 +28,15 @@ PREVIEWS = {
     "Американец 🇺🇸": "Хэллоу, парни. Теперь я как будто из Техаса, смиритесь.",
     "Немец 🍺": "Заговорил как немецкий инженер. Порядка в вашем разговоре всё равно не прибавится.",
     "Француз 🥖": "Уи, теперь я звучу дорого. В отличие от ваших шуток.",
+    "Гугл Переводчик 🌐": "Так, теперь я звучу как гугл-переводчик. Да, это было неизбежно.",
 }
 
 
 async def synthesize(text: str, path: str, voice_key: str | None = None) -> str:
     preset = VOICES.get(voice_key) or {"voice": config.TTS_VOICE}
+    if preset.get("engine") == "gtts":
+        await asyncio.to_thread(lambda: gTTS(text=text, lang="ru").save(path))
+        return path
     communicate = edge_tts.Communicate(
         text,
         preset["voice"],

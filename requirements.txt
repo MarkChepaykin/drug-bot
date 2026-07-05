@@ -3,4 +3,5 @@ audioop-lts; python_version >= "3.13"
 PyNaCl>=1.5
 groq>=0.13
 edge-tts>=6.1
+gTTS>=2.5
 python-dotenv>=1.0
