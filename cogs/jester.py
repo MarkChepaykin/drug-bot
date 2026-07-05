@@ -147,16 +147,19 @@ class Jester(commands.Cog):
         await self._speak(session, joke)
 
     async def _speak(self, session: JesterSession, text: str):
-        path = os.path.join(tempfile.gettempdir(), f"jester_{session.vc.guild.id}.mp3")
-        await tts.synthesize(text, path)
-        if session.vc.recording:
-            session.vc.stop_recording()
-        while session.vc.is_playing():
-            await asyncio.sleep(0.2)
-        done = asyncio.Event()
-        source = discord.FFmpegPCMAudio(path)
-        session.vc.play(source, after=lambda e: self.bot.loop.call_soon_threadsafe(done.set))
-        await done.wait()
+        try:
+            path = os.path.join(tempfile.gettempdir(), f"jester_{session.vc.guild.id}.mp3")
+            await tts.synthesize(text, path)
+            if session.vc.recording:
+                session.vc.stop_recording()
+            while session.vc.is_playing():
+                await asyncio.sleep(0.2)
+            done = asyncio.Event()
+            source = discord.FFmpegPCMAudio(path)
+            session.vc.play(source, after=lambda e: self.bot.loop.call_soon_threadsafe(done.set))
+            await done.wait()
+        except Exception as e:
+            await session.text_channel.send(f"⚠️ Озвучка не сработала: `{type(e).__name__}: {e}`")
 
 
 def setup(bot):
