@@ -3,6 +3,7 @@ services:
     name: drug-bot
     runtime: docker
     plan: free
+    region: frankfurt
     envVars:
       - key: DISCORD_TOKEN
         sync: false
