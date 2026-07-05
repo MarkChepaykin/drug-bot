@@ -17,9 +17,10 @@ from services import llm, tts
 
 
 class JesterSession:
-    def __init__(self, voice_client, text_channel):
+    def __init__(self, voice_client, text_channel, voice_key):
         self.vc = voice_client
         self.text_channel = text_channel
+        self.voice_key = voice_key
         self.active = True
         self.last_err = 0.0
         self.history = deque(maxlen=12)
@@ -27,10 +28,30 @@ class JesterSession:
         self.speak_lock = asyncio.Lock()
 
 
+class VoiceSelect(discord.ui.Select):
+    def __init__(self, cog, session):
+        self.cog = cog
+        self.session = session
+        options = [
+            discord.SelectOption(label=name, default=(name == session.voice_key))
+            for name in tts.VOICES
+        ]
+        super().__init__(placeholder="Каким голосом говорить?", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        key = self.values[0]
+        self.session.voice_key = key
+        self.cog.default_voice_key = key
+        await interaction.response.send_message(f"Голос: **{key}**", ephemeral=True)
+        preview = tts.PREVIEWS.get(key, "Привет, теперь я говорю вот так.")
+        await self.cog._speak(self.session, preview)
+
+
 class Jester(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.sessions: dict[int, JesterSession] = {}
+        self.default_voice_key = tts.DEFAULT_VOICE_KEY
 
     @commands.Cog.listener()
     async def on_application_command(self, ctx):
@@ -55,7 +76,7 @@ class Jester(commands.Cog):
         except Exception as e:
             await ctx.followup.send(f"Не смог подключиться к голосу ({type(e).__name__}: {e})")
             return
-        self.sessions[ctx.guild.id] = JesterSession(vc, ctx.channel)
+        self.sessions[ctx.guild.id] = JesterSession(vc, ctx.channel, self.default_voice_key)
         await ctx.followup.send(
             f"Зашёл в **{channel.name}**. Пиши мне в этот канал — отвечу голосом 🎤"
         )
@@ -70,6 +91,15 @@ class Jester(commands.Cog):
         session.active = False
         await session.vc.disconnect()
         await ctx.respond("Вышел. 👋")
+
+    @discord.slash_command(description="Выбрать голос бота (с озвученным превью)")
+    async def voice(self, ctx: discord.ApplicationContext):
+        session = self.sessions.get(ctx.guild.id)
+        if not session:
+            await ctx.respond("Сначала позови меня в войс: /join", ephemeral=True)
+            return
+        view = discord.ui.View(VoiceSelect(self, session), timeout=120)
+        await ctx.respond("Выбери голос — я сразу скажу превью:", view=view, ephemeral=True)
 
     @discord.slash_command(description="Пошутить прямо сейчас")
     async def joke(self, ctx: discord.ApplicationContext):
@@ -132,7 +162,7 @@ class Jester(commands.Cog):
         try:
             async with session.speak_lock:
                 path = os.path.join(tempfile.gettempdir(), f"jester_{session.vc.guild.id}.mp3")
-                await tts.synthesize(text, path)
+                await tts.synthesize(text, path, session.voice_key)
                 while session.vc.is_playing():
                     await asyncio.sleep(0.2)
                 done = asyncio.Event()
