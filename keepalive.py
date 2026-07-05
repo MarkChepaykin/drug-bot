@@ -5,11 +5,14 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
+status = "starting"
+
+
 class _Ping(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"ok")
+        self.wfile.write(status.encode())
 
     def log_message(self, *args):
         pass

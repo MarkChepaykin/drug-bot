@@ -1,8 +1,10 @@
 import logging
+import time
 
 import discord
 
 import config
+import keepalive
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("discord.gateway").setLevel(logging.DEBUG)
@@ -17,6 +19,7 @@ bot = discord.Bot(intents=intents, debug_guilds=debug_guilds)
 
 @bot.event
 async def on_ready():
+    keepalive.status = "online"
     print(f"Бот запущен: {bot.user} ({bot.user.id})")
 
 
@@ -28,6 +31,13 @@ if __name__ == "__main__":
         raise SystemExit("DISCORD_TOKEN не задан в .env")
     if not config.GROQ_API_KEY:
         raise SystemExit("GROQ_API_KEY не задан в .env")
-    import keepalive
     keepalive.start()
-    bot.run(config.DISCORD_TOKEN)
+    try:
+        bot.run(config.DISCORD_TOKEN)
+    except discord.HTTPException as e:
+        if e.status == 429:
+            # Cloudflare забанил IP хостинга — не долбим рестартами, ждём и пробуем снова
+            keepalive.status = "banned_429"
+            print("[fatal] Discord 429 (Cloudflare бан IP) — жду 10 минут перед рестартом", flush=True)
+            time.sleep(600)
+        raise
