@@ -101,14 +101,14 @@ class Jester(commands.Cog):
         view = discord.ui.View(VoiceSelect(self, session), timeout=120)
         await ctx.respond("Выбери голос — я сразу скажу превью:", view=view, ephemeral=True)
 
-    @discord.slash_command(description="Пошутить прямо сейчас")
+    @discord.slash_command(description="Пусть вклинится в разговор прямо сейчас")
     async def joke(self, ctx: discord.ApplicationContext):
         session = self.sessions.get(ctx.guild.id)
         if not session:
             await ctx.respond("Сначала позови меня: /join", ephemeral=True)
             return
-        await ctx.respond("Щас придумаю...", ephemeral=True)
-        await self._tell_joke(session)
+        await ctx.respond("Ага.", ephemeral=True)
+        await self._interject(session)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -141,7 +141,7 @@ class Jester(commands.Cog):
                 await asyncio.sleep(config.JOKE_INTERVAL)
                 if session.fresh_lines:
                     session.fresh_lines = 0
-                    await self._tell_joke(session)
+                    await self._interject(session)
             except Exception as e:
                 print(f"[jester] loop error: {e!r}")
                 if time.monotonic() - session.last_err > 60:
@@ -152,11 +152,10 @@ class Jester(commands.Cog):
                         pass
                 await asyncio.sleep(2)
 
-    async def _tell_joke(self, session: JesterSession):
-        lines = [m["content"] for m in session.history if m["role"] == "user"]
-        context = "\n".join(lines[-10:]) or "Разговор только начался, пошути на любую тему."
-        joke = await llm.make_joke(context)
-        await self._speak(session, joke)
+    async def _interject(self, session: JesterSession):
+        reply = await llm.interject(list(session.history))
+        session.history.append({"role": "assistant", "content": reply})
+        await self._speak(session, reply)
 
     async def _speak(self, session: JesterSession, text: str):
         try:
