@@ -3,35 +3,33 @@ import os
 import re
 import tempfile
 import time
+import uuid
 from collections import deque
 
 import discord
 from discord.ext import commands
 
-import config
-from services import llm, tts
+from services import ears, llm, stt, tts
 
-# Прослушка разговора ВЫКЛЮЧЕНА: приём голоса сломан в py-cord 2.8
-# (DAVE E2EE, https://github.com/Pycord-Development/pycord/issues/3139).
-# Вместо ушей — текстовый канал: пока бот в войсе, он голосом отвечает
-# на сообщения в канале, откуда его позвали, и подшучивает по теме беседы.
-
+# Голосом (соединение, приём и проигрывание) управляет Node-сервис ears
+# (discord.js + DAVE E2EE). Python — мозг: STT, персона, решения когда говорить.
 
 # Сколько секунд тишины ждать перед репликой, когда говорят несколько человек.
 QUIET_SECONDS = 8
-# Автор считается активным участником, если писал в последние N секунд.
+# Автор считается активным участником, если говорил/писал в последние N секунд.
 ACTIVE_WINDOW = 60
+# Мусорные фразы Whisper на шуме/тишине.
+STT_JUNK = ("субтитр", "продолжение следует", "спасибо за просмотр", "dimatorzok")
 
 
 class JesterSession:
-    def __init__(self, voice_client, text_channel, voice_key):
-        self.vc = voice_client
+    def __init__(self, guild_id, text_channel, voice_key):
+        self.guild_id = guild_id
         self.text_channel = text_channel
         self.voice_key = voice_key
         self.active = True
         self.last_err = 0.0
-        self.history = deque(maxlen=12)
-        self.speak_lock = asyncio.Lock()
+        self.history = deque(maxlen=16)
         self.authors: dict[int, float] = {}
         self.last_msg_time = 0.0
         self.pending: asyncio.Task | None = None
@@ -70,7 +68,7 @@ class Jester(commands.Cog):
     async def on_application_command_error(self, ctx, error):
         print(f"[cmd-error] /{ctx.command}: {error!r}", flush=True)
 
-    @discord.slash_command(description="Зайти в твой голосовой канал и общаться голосом")
+    @discord.slash_command(description="Зайти в твой голосовой канал и общаться")
     async def join(self, ctx: discord.ApplicationContext):
         if not ctx.author.voice:
             await ctx.respond("Ты не в голосовом канале.", ephemeral=True)
@@ -81,15 +79,13 @@ class Jester(commands.Cog):
         await ctx.defer()
         channel = ctx.author.voice.channel
         try:
-            vc = await channel.connect(timeout=20)
+            await ears.join(ctx.guild.id, channel.id)
         except Exception as e:
-            await ctx.followup.send(f"Не смог подключиться к голосу ({type(e).__name__}: {e})")
+            await ctx.followup.send(f"Не смог подключиться к голосу: `{type(e).__name__}: {e}`")
             return
-        session = JesterSession(vc, ctx.channel, self.default_voice_key)
+        session = JesterSession(ctx.guild.id, ctx.channel, self.default_voice_key)
         self.sessions[ctx.guild.id] = session
-        await ctx.followup.send(
-            f"Зашёл в **{channel.name}**. Пиши мне в этот канал — отвечу голосом 🎤"
-        )
+        await ctx.followup.send(f"Зашёл в **{channel.name}** 🎤")
         names = [m.display_name for m in channel.members if not m.bot]
         try:
             hello = await llm.greeting(names)
@@ -108,7 +104,10 @@ class Jester(commands.Cog):
         session.active = False
         if session.pending:
             session.pending.cancel()
-        await session.vc.disconnect()
+        try:
+            await ears.leave(ctx.guild.id)
+        except Exception:
+            pass
         await ctx.respond("Вышел. 👋")
 
     @discord.slash_command(description="Выбрать голос бота (с озвученным превью)")
@@ -129,6 +128,38 @@ class Jester(commands.Cog):
         await ctx.respond("Ага.", ephemeral=True)
         await self._interject(session)
 
+    # --- входящие реплики: голос (от ears) и текст (из канала) ---
+
+    async def handle_utterance(self, data: dict):
+        session = self.sessions.get(int(data["guild_id"]))
+        path = data.get("path", "")
+        try:
+            if not session or not session.active:
+                return
+            try:
+                wav = open(path, "rb").read()
+            except OSError:
+                return
+            try:
+                text = await stt.transcribe(wav)
+            except Exception as e:
+                print(f"[jester] stt error: {e!r}")
+                return
+            text = (text or "").strip()
+            if len(text) < 2 or any(j in text.lower() for j in STT_JUNK):
+                return
+            user_id = int(data["user_id"])
+            member = session.text_channel.guild.get_member(user_id)
+            name = member.display_name if member else "Кто-то"
+            print(f"[jester] услышал {name}: {text}", flush=True)
+            direct = re.search(r"\bдруг", text.lower()) is not None
+            await self._on_line(session, user_id, name, text, direct)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         session = self.sessions.get(message.guild.id) if message.guild else None
@@ -139,19 +170,20 @@ class Jester(commands.Cog):
         content = message.clean_content.strip()
         if not content:
             return
-        now = time.monotonic()
-        session.history.append(
-            {"role": "user", "content": f"{message.author.display_name}: {content}"}
-        )
-        session.last_msg_time = now
-        session.authors[message.author.id] = now
-        active = sum(1 for t in session.authors.values() if now - t < ACTIVE_WINDOW)
         direct = (
             self.bot.user in message.mentions
             or re.search(r"\bдруг\b", content.lower()) is not None
         )
+        await self._on_line(session, message.author.id, message.author.display_name, content, direct)
+
+    async def _on_line(self, session: JesterSession, author_id: int, name: str, text: str, direct: bool):
+        now = time.monotonic()
+        session.history.append({"role": "user", "content": f"{name}: {text}"})
+        session.last_msg_time = now
+        session.authors[author_id] = now
+        active = sum(1 for t in session.authors.values() if now - t < ACTIVE_WINDOW)
         if direct or active <= 1:
-            # обращение или диалог один на один — отвечаем сразу
+            # обращение или разговор один на один — отвечаем сразу
             if session.pending:
                 session.pending.cancel()
                 session.pending = None
@@ -184,15 +216,9 @@ class Jester(commands.Cog):
 
     async def _speak(self, session: JesterSession, text: str):
         try:
-            async with session.speak_lock:
-                path = os.path.join(tempfile.gettempdir(), f"jester_{session.vc.guild.id}.mp3")
-                await tts.synthesize(text, path, session.voice_key)
-                while session.vc.is_playing():
-                    await asyncio.sleep(0.2)
-                done = asyncio.Event()
-                source = discord.FFmpegPCMAudio(path)
-                session.vc.play(source, after=lambda e: self.bot.loop.call_soon_threadsafe(done.set))
-                await done.wait()
+            path = os.path.join(tempfile.gettempdir(), f"speak_{uuid.uuid4().hex}.mp3")
+            await tts.synthesize(text, path, session.voice_key)
+            await ears.play(session.guild_id, path)
         except Exception as e:
             await session.text_channel.send(f"⚠️ Озвучка не сработала: `{type(e).__name__}: {e}`")
 

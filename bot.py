@@ -35,6 +35,16 @@ async def on_ready():
 bot.load_extension("cogs.jester")
 bot.load_extension("cogs.chat")
 
+
+def _on_utterance(data):
+    cog = bot.get_cog("Jester")
+    if cog and bot.loop and not bot.loop.is_closed():
+        import asyncio
+        asyncio.run_coroutine_threadsafe(cog.handle_utterance(data), bot.loop)
+
+
+keepalive.on_utterance = _on_utterance
+
 if __name__ == "__main__":
     if not config.DISCORD_TOKEN:
         raise SystemExit("DISCORD_TOKEN не задан в .env")
