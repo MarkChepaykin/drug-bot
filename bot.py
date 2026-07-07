@@ -43,7 +43,14 @@ def _on_utterance(data):
         asyncio.run_coroutine_threadsafe(cog.handle_utterance(data), bot.loop)
 
 
+def _on_speaking(data):
+    cog = bot.get_cog("Jester")
+    if cog and bot.loop and not bot.loop.is_closed():
+        cog.handle_speaking(data)
+
+
 keepalive.on_utterance = _on_utterance
+keepalive.on_speaking = _on_speaking
 
 if __name__ == "__main__":
     if not config.DISCORD_TOKEN:

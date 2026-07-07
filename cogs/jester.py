@@ -16,9 +16,10 @@ from services import ears, llm, music, stt, tts
 
 # Сколько секунд тишины ждать перед ответом в диалоге 1:1 — даёт человеку закончить
 # мысль, а не отвечать на каждый обрывок фразы (речь режется на куски по паузам).
-TURN_GAP = 1.8
+# Продлевается в реальном времени сигналом /speaking, так что можно держать коротким.
+TURN_GAP = 1.1
 # Сколько секунд тишины ждать перед репликой, когда говорят несколько человек.
-GROUP_GAP = 8
+GROUP_GAP = 7
 # Автор считается активным участником, если говорил/писал в последние N секунд.
 ACTIVE_WINDOW = 60
 # Мусорные фразы Whisper на шуме/тишине.
@@ -181,6 +182,15 @@ class Jester(commands.Cog):
         await self._interject(session)
 
     # --- входящие реплики: голос (от ears) и текст (из канала) ---
+
+    def handle_speaking(self, data: dict):
+        """Реалтайм-пинг «кто-то говорит» от ears — продлевает ожидание, не даёт боту перебивать."""
+        session = self.sessions.get(int(data["guild_id"]))
+        if not session or not session.active:
+            return
+        now = time.monotonic()
+        session.last_msg_time = now
+        session.authors[int(data["user_id"])] = now
 
     async def handle_utterance(self, data: dict):
         session = self.sessions.get(int(data["guild_id"]))

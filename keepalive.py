@@ -5,11 +5,12 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "v15"
+VERSION = "v17"
 status = "starting"
 
-# Хук для входящих фраз из войса (ставит bot.py). Вызывается из потока HTTP-сервера.
+# Хуки для событий войса (ставит bot.py). Вызываются из потока HTTP-сервера.
 on_utterance = None
+on_speaking = None
 
 
 def full_status() -> str:
@@ -23,7 +24,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(full_status().encode())
 
     def do_POST(self):
-        if self.path != "/utterance":
+        if self.path not in ("/utterance", "/speaking"):
             self.send_response(404)
             self.end_headers()
             return
@@ -33,8 +34,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", 0))
         data = json.loads(self.rfile.read(length) or b"{}")
-        if on_utterance:
+        if self.path == "/utterance" and on_utterance:
             on_utterance(data)
+        elif self.path == "/speaking" and on_speaking:
+            on_speaking(data)
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ok")

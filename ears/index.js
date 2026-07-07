@@ -14,6 +14,7 @@ const {
   VoiceConnectionStatus,
   AudioPlayerStatus,
   EndBehaviorType,
+  StreamType,
 } = require("@discordjs/voice");
 const prism = require("prism-media");
 
@@ -93,6 +94,18 @@ async function postUtterance(guildId, userId, file) {
   }
 }
 
+async function postSpeaking(guildId, userId) {
+  try {
+    await fetch(`http://127.0.0.1:${BRAIN_PORT}/speaking`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Ears-Token": EARS_TOKEN },
+      body: JSON.stringify({ guild_id: guildId, user_id: userId }),
+    });
+  } catch (e) {
+    // не критично, теряем один пинг
+  }
+}
+
 function subscribeUser(conn, guildId, userId) {
   const st = getState(guildId);
   if (st.subs.has(userId)) return;
@@ -104,11 +117,19 @@ function subscribeUser(conn, guildId, userId) {
   const dec = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
   const chunks = [];
   let size = 0;
+  let lastPing = 0;
 
   dec.on("data", (c) => {
     if (size < MAX_PCM_BYTES) {
       chunks.push(c);
       size += c.length;
+    }
+    // На случай длинной фразы почти без пауз — event "speaking start" мог отфаериться
+    // только раз в начале; подстраховываемся троттлинг-пингом прямо по потоку данных.
+    const now = Date.now();
+    if (now - lastPing > 600) {
+      lastPing = now;
+      postSpeaking(guildId, userId);
     }
   });
 
@@ -133,6 +154,9 @@ function subscribeUser(conn, guildId, userId) {
 function attachReceiver(conn, guildId) {
   conn.receiver.speaking.on("start", (userId) => {
     if (userId === client.user.id) return;
+    // Пингуем мозг СРАЗУ, не дожидаясь конца фразы и распознавания — это даёт
+    // Python настоящую задержку "человек ещё говорит" и не даёт боту перебивать.
+    postSpeaking(guildId, userId);
     subscribeUser(conn, guildId, userId);
   });
 }
@@ -235,6 +259,26 @@ function play(guildId, file) {
 
 // --- музыка ---
 
+function trackResource(url) {
+  // Свой ffmpeg с reconnect-флагами: потоковые URL (HLS-плейлисты, CDN-ссылки) от
+  // yt-dlp/SoundCloud иногда обрываются или требуют переподключения на лету.
+  const transcoder = new prism.FFmpeg({
+    args: [
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "5",
+      "-i", url,
+      "-analyzeduration", "0",
+      "-loglevel", "warning",
+      "-f", "s16le",
+      "-ar", "48000",
+      "-ac", "2",
+    ],
+  });
+  transcoder.on("error", (e) => log("ffmpeg track error:", e.message));
+  return createAudioResource(transcoder, { inputType: StreamType.Raw });
+}
+
 function nextTrack(guildId) {
   const st = getState(guildId);
   const track = st.musicQueue.shift();
@@ -243,7 +287,7 @@ function nextTrack(guildId) {
     return;
   }
   st.musicActive = true;
-  st.musicPlayer.play(createAudioResource(track.url));
+  st.musicPlayer.play(trackResource(track.url));
   log("music:", track.title);
   if (!st.currentSpeech && st.speechQueue.length === 0) subscribeTo(guildId, "music");
 }
