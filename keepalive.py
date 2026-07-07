@@ -5,7 +5,7 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "v13"
+VERSION = "v14"
 status = "starting"
 
 # Хук для входящих фраз из войса (ставит bot.py). Вызывается из потока HTTP-сервера.

@@ -31,15 +31,36 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
 
-const states = new Map(); // guildId -> { player, queue, subs, current, subscribedConn }
+const states = new Map(); // guildId -> состояние гильдии
 
 function getState(guildId) {
   let st = states.get(guildId);
   if (!st) {
-    st = { player: null, queue: [], subs: new Set(), current: null, subscribedConn: null };
+    st = {
+      subs: new Set(),
+      speechPlayer: null,
+      speechQueue: [],
+      currentSpeech: null,
+      musicPlayer: null,
+      musicQueue: [],
+      musicActive: false,
+      subscription: null,
+      subscribedTo: null,
+    };
     states.set(guildId, st);
   }
   return st;
+}
+
+function subscribeTo(guildId, which) {
+  const st = getState(guildId);
+  const conn = getVoiceConnection(guildId);
+  if (!conn) return;
+  const player = which === "music" ? st.musicPlayer : st.speechPlayer;
+  if (!player || st.subscribedTo === which) return;
+  if (st.subscription) st.subscription.unsubscribe();
+  st.subscription = conn.subscribe(player);
+  st.subscribedTo = which;
 }
 
 function wavHeader(dataLen) {
@@ -149,42 +170,102 @@ function leave(guildId) {
   const conn = getVoiceConnection(guildId);
   if (conn) conn.destroy();
   const st = getState(guildId);
-  st.queue = [];
-  if (st.player) st.player.stop();
-  st.subscribedConn = null;
+  st.speechQueue = [];
+  st.musicQueue = [];
+  st.musicActive = false;
+  if (st.speechPlayer) st.speechPlayer.stop();
+  if (st.musicPlayer) st.musicPlayer.stop();
+  st.subscription = null;
+  st.subscribedTo = null;
   log("left", guildId);
 }
 
-function playNext(guildId) {
+function ensurePlayers(guildId) {
   const st = getState(guildId);
-  if (st.current) {
-    fs.unlink(st.current, () => {});
-    st.current = null;
+  if (!st.speechPlayer) {
+    st.speechPlayer = createAudioPlayer();
+    st.speechPlayer.on(AudioPlayerStatus.Idle, () => nextSpeech(guildId));
+    st.speechPlayer.on("error", (e) => {
+      log("speech player error:", e.message);
+      nextSpeech(guildId);
+    });
   }
-  const file = st.queue.shift();
-  if (!file) return;
-  st.current = file;
-  st.player.play(createAudioResource(file));
+  if (!st.musicPlayer) {
+    st.musicPlayer = createAudioPlayer();
+    st.musicPlayer.on(AudioPlayerStatus.Idle, () => nextTrack(guildId));
+    st.musicPlayer.on("error", (e) => {
+      log("music player error:", e.message);
+      nextTrack(guildId);
+    });
+  }
+}
+
+// --- речь: приоритетнее музыки, музыка на паузу ---
+
+function nextSpeech(guildId) {
+  const st = getState(guildId);
+  if (st.currentSpeech) {
+    fs.unlink(st.currentSpeech, () => {});
+    st.currentSpeech = null;
+  }
+  const file = st.speechQueue.shift();
+  if (file) {
+    st.currentSpeech = file;
+    st.speechPlayer.play(createAudioResource(file));
+    return;
+  }
+  // речь кончилась — возвращаем музыку
+  if (st.musicActive) {
+    subscribeTo(guildId, "music");
+    st.musicPlayer.unpause();
+  }
 }
 
 function play(guildId, file) {
-  const conn = getVoiceConnection(guildId);
-  if (!conn) throw new Error("not connected to voice");
+  if (!getVoiceConnection(guildId)) throw new Error("not connected to voice");
   const st = getState(guildId);
-  if (!st.player) {
-    st.player = createAudioPlayer();
-    st.player.on(AudioPlayerStatus.Idle, () => playNext(guildId));
-    st.player.on("error", (e) => {
-      log("player error:", e.message);
-      playNext(guildId);
-    });
+  ensurePlayers(guildId);
+  st.speechQueue.push(file);
+  if (st.musicActive) st.musicPlayer.pause();
+  subscribeTo(guildId, "speech");
+  if (st.speechPlayer.state.status === AudioPlayerStatus.Idle && !st.currentSpeech) {
+    nextSpeech(guildId);
   }
-  if (st.subscribedConn !== conn) {
-    conn.subscribe(st.player);
-    st.subscribedConn = conn;
+}
+
+// --- музыка ---
+
+function nextTrack(guildId) {
+  const st = getState(guildId);
+  const track = st.musicQueue.shift();
+  if (!track) {
+    st.musicActive = false;
+    return;
   }
-  st.queue.push(file);
-  if (st.player.state.status === AudioPlayerStatus.Idle && !st.current) playNext(guildId);
+  st.musicActive = true;
+  st.musicPlayer.play(createAudioResource(track.url));
+  log("music:", track.title);
+  if (!st.currentSpeech && st.speechQueue.length === 0) subscribeTo(guildId, "music");
+}
+
+function music(guildId, url, title) {
+  if (!getVoiceConnection(guildId)) throw new Error("not connected to voice");
+  const st = getState(guildId);
+  ensurePlayers(guildId);
+  st.musicQueue.push({ url, title });
+  if (!st.musicActive) nextTrack(guildId);
+}
+
+function skip(guildId) {
+  const st = getState(guildId);
+  if (st.musicPlayer) st.musicPlayer.stop(); // Idle → nextTrack
+}
+
+function stopMusic(guildId) {
+  const st = getState(guildId);
+  st.musicQueue = [];
+  st.musicActive = false;
+  if (st.musicPlayer) st.musicPlayer.stop();
 }
 
 const server = http.createServer((req, res) => {
@@ -201,6 +282,9 @@ const server = http.createServer((req, res) => {
       if (req.url === "/join") await join(String(data.guild_id), String(data.channel_id));
       else if (req.url === "/leave") leave(String(data.guild_id));
       else if (req.url === "/play") play(String(data.guild_id), data.path);
+      else if (req.url === "/music") music(String(data.guild_id), data.url, data.title);
+      else if (req.url === "/skip") skip(String(data.guild_id));
+      else if (req.url === "/stopmusic") stopMusic(String(data.guild_id));
       else {
         res.statusCode = 404;
         res.end("nope");

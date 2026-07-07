@@ -9,7 +9,7 @@ from collections import deque
 import discord
 from discord.ext import commands
 
-from services import ears, llm, stt, tts
+from services import ears, llm, music, stt, tts
 
 # Голосом (соединение, приём и проигрывание) управляет Node-сервис ears
 # (discord.js + DAVE E2EE). Python — мозг: STT, персона, решения когда говорить.
@@ -29,7 +29,9 @@ class JesterSession:
         self.voice_key = voice_key
         self.active = True
         self.last_err = 0.0
-        self.history = deque(maxlen=16)
+        self.history = deque(maxlen=40)
+        self.notes = ""
+        self.lines_since_sum = 0
         self.authors: dict[int, float] = {}
         self.last_msg_time = 0.0
         self.pending: asyncio.Task | None = None
@@ -68,32 +70,45 @@ class Jester(commands.Cog):
     async def on_application_command_error(self, ctx, error):
         print(f"[cmd-error] /{ctx.command}: {error!r}", flush=True)
 
-    @discord.slash_command(description="Зайти в твой голосовой канал и общаться")
-    async def join(self, ctx: discord.ApplicationContext):
+    async def _ensure_session(self, ctx, greet: bool = True):
+        """Сессия есть — вернуть; нет — подключиться к войсу автора. None при неудаче (ответ уже отправлен)."""
+        session = self.sessions.get(ctx.guild.id)
+        if session:
+            return session
         if not ctx.author.voice:
-            await ctx.respond("Ты не в голосовом канале.", ephemeral=True)
-            return
-        if ctx.guild.id in self.sessions:
-            await ctx.respond("Я уже тут.", ephemeral=True)
-            return
-        await ctx.defer()
+            await ctx.followup.send("Ты не в голосовом канале.")
+            return None
         channel = ctx.author.voice.channel
         try:
             await ears.join(ctx.guild.id, channel.id)
         except Exception as e:
             await ctx.followup.send(f"Не смог подключиться к голосу: `{type(e).__name__}: {e}`")
-            return
+            return None
         session = JesterSession(ctx.guild.id, ctx.channel, self.default_voice_key)
         self.sessions[ctx.guild.id] = session
-        await ctx.followup.send(f"Зашёл в **{channel.name}** 🎤")
-        names = [m.display_name for m in channel.members if not m.bot]
+        if greet:
+            names = [m.display_name for m in channel.members if not m.bot]
+            self.bot.loop.create_task(self._greet(session, names))
+        return session
+
+    async def _greet(self, session: JesterSession, names: list[str]):
         try:
-            hello = await llm.greeting(names)
+            hello = await llm.greeting(names, session.notes)
         except Exception as e:
             await session.text_channel.send(f"⚠️ Мозг не ответил: `{type(e).__name__}: {e}`")
             return
         session.history.append({"role": "assistant", "content": hello})
         await self._speak(session, hello)
+
+    @discord.slash_command(description="Зайти в твой голосовой канал и общаться")
+    async def join(self, ctx: discord.ApplicationContext):
+        if ctx.guild.id in self.sessions:
+            await ctx.respond("Я уже тут.", ephemeral=True)
+            return
+        await ctx.defer()
+        session = await self._ensure_session(ctx)
+        if session:
+            await ctx.followup.send(f"Зашёл 🎤")
 
     @discord.slash_command(description="Выйти из голосового канала")
     async def leave(self, ctx: discord.ApplicationContext):
@@ -109,6 +124,36 @@ class Jester(commands.Cog):
         except Exception:
             pass
         await ctx.respond("Вышел. 👋")
+
+    @discord.slash_command(description="Включить музыку: название или ссылка (YouTube/Spotify/Яндекс)")
+    async def play(self, ctx: discord.ApplicationContext, query: str):
+        await ctx.defer()
+        session = await self._ensure_session(ctx, greet=False)
+        if not session:
+            return
+        try:
+            url, title = await music.resolve(query)
+            await ears.music(ctx.guild.id, url, title)
+        except Exception as e:
+            await ctx.followup.send(f"Не вышло с музыкой: `{type(e).__name__}: {e}`")
+            return
+        await ctx.followup.send(f"🎵 **{title}**")
+
+    @discord.slash_command(description="Пропустить текущий трек")
+    async def skip(self, ctx: discord.ApplicationContext):
+        try:
+            await ears.skip(ctx.guild.id)
+            await ctx.respond("⏭️", ephemeral=True)
+        except Exception as e:
+            await ctx.respond(f"`{e}`", ephemeral=True)
+
+    @discord.slash_command(description="Остановить музыку и очистить очередь")
+    async def stop(self, ctx: discord.ApplicationContext):
+        try:
+            await ears.stop_music(ctx.guild.id)
+            await ctx.respond("⏹️", ephemeral=True)
+        except Exception as e:
+            await ctx.respond(f"`{e}`", ephemeral=True)
 
     @discord.slash_command(description="Выбрать голос бота (с озвученным превью)")
     async def voice(self, ctx: discord.ApplicationContext):
@@ -181,6 +226,10 @@ class Jester(commands.Cog):
         session.history.append({"role": "user", "content": f"{name}: {text}"})
         session.last_msg_time = now
         session.authors[author_id] = now
+        session.lines_since_sum += 1
+        if session.lines_since_sum >= 25:
+            session.lines_since_sum = 0
+            self.bot.loop.create_task(self._compact(session))
         active = sum(1 for t in session.authors.values() if now - t < ACTIVE_WINDOW)
         if direct or active <= 1:
             # обращение или разговор один на один — отвечаем сразу
@@ -188,7 +237,7 @@ class Jester(commands.Cog):
                 session.pending.cancel()
                 session.pending = None
             try:
-                reply = await llm.voice_chat(list(session.history))
+                reply = await llm.voice_chat(list(session.history), session.notes)
             except Exception as e:
                 await session.text_channel.send(f"⚠️ Мозг не ответил: `{type(e).__name__}: {e}`")
                 return
@@ -209,8 +258,17 @@ class Jester(commands.Cog):
         except Exception as e:
             print(f"[jester] quiet-wait error: {e!r}")
 
+    async def _compact(self, session: JesterSession):
+        """Сжимает разговор в долгие заметки о компании."""
+        lines = [m["content"] for m in list(session.history) if m["role"] == "user"]
+        try:
+            session.notes = await llm.summarize(session.notes, lines)
+            print(f"[jester] заметки обновлены ({len(session.notes)} символов)", flush=True)
+        except Exception as e:
+            print(f"[jester] summarize error: {e!r}")
+
     async def _interject(self, session: JesterSession):
-        reply = await llm.interject(list(session.history))
+        reply = await llm.interject(list(session.history), session.notes)
         session.history.append({"role": "assistant", "content": reply})
         await self._speak(session, reply)
 
