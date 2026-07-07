@@ -57,6 +57,13 @@ GREETING_SYSTEM = PERSONA + (
     "Каждый раз здоровайся по-разному. Только устная речь, без эмодзи и ремарок."
 )
 
+TRACK_SUGGEST_SYSTEM = (
+    "Ты подбираешь следующий трек для прослушивания в этой компании друзей — учитывай "
+    "настроение и тему недавнего разговора. Ответь СТРОГО в формате «Исполнитель - Название», "
+    "один конкретный реально существующий трек, без пояснений, кавычек и лишних слов. "
+    "Не повторяй то, что уже играло."
+)
+
 SUMMARIZE_SYSTEM = (
     "Ты ведёшь личные заметки о компании друзей по их разговорам. Обнови заметки: объедини "
     "старые с новым куском разговора. Сохраняй факты о людях (интересы, привычки, кто как "
@@ -114,3 +121,9 @@ async def greeting(member_names: list[str], notes: str = "") -> str:
 async def summarize(notes: str, lines: list[str]) -> str:
     content = f"Старые заметки:\n{notes or '—'}\n\nНовый кусок разговора:\n" + "\n".join(lines)
     return await chat([{"role": "user", "content": content}], system=SUMMARIZE_SYSTEM)
+
+
+async def suggest_track(notes: str, recent_titles: list[str]) -> str:
+    recent = ", ".join(recent_titles) if recent_titles else "ничего ещё"
+    content = f"Настроение/заметки о компании: {notes or 'пока нет'}. Уже играло: {recent}. Предложи следующий трек."
+    return await chat([{"role": "user", "content": content}], system=TRACK_SUGGEST_SYSTEM, max_tokens=40)

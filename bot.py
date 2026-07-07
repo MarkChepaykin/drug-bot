@@ -49,8 +49,16 @@ def _on_speaking(data):
         cog.handle_speaking(data)
 
 
+def _on_music_state(data):
+    cog = bot.get_cog("Jester")
+    if cog and bot.loop and not bot.loop.is_closed():
+        import asyncio
+        asyncio.run_coroutine_threadsafe(cog.handle_music_state(data), bot.loop)
+
+
 keepalive.on_utterance = _on_utterance
 keepalive.on_speaking = _on_speaking
+keepalive.on_music_state = _on_music_state
 
 if __name__ == "__main__":
     if not config.DISCORD_TOKEN:

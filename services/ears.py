@@ -34,3 +34,24 @@ async def skip(guild_id: int):
 async def stop_music(guild_id: int):
     r = await _client.post(f"{EARS_URL}/stopmusic", json={"guild_id": str(guild_id)})
     r.raise_for_status()
+
+
+async def pause_music(guild_id: int):
+    r = await _client.post(f"{EARS_URL}/pausemusic", json={"guild_id": str(guild_id)})
+    r.raise_for_status()
+
+
+async def resume_music(guild_id: int):
+    r = await _client.post(f"{EARS_URL}/resumemusic", json={"guild_id": str(guild_id)})
+    r.raise_for_status()
+
+
+async def set_repeat(guild_id: int, on: bool):
+    r = await _client.post(f"{EARS_URL}/repeat", json={"guild_id": str(guild_id), "on": on})
+    r.raise_for_status()
+
+
+async def queue(guild_id: int) -> dict:
+    r = await _client.get(f"{EARS_URL}/queue", params={"guild_id": str(guild_id)})
+    r.raise_for_status()
+    return r.json()

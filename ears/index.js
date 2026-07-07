@@ -45,6 +45,8 @@ function getState(guildId) {
       musicPlayer: null,
       musicQueue: [],
       musicActive: false,
+      musicRepeat: false,
+      lastTrack: null,
       subscription: null,
       subscribedTo: null,
     };
@@ -103,6 +105,18 @@ async function postSpeaking(guildId, userId) {
     });
   } catch (e) {
     // не критично, теряем один пинг
+  }
+}
+
+async function postMusicState(guildId, active) {
+  try {
+    await fetch(`http://127.0.0.1:${BRAIN_PORT}/music_state`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Ears-Token": EARS_TOKEN },
+      body: JSON.stringify({ guild_id: guildId, active }),
+    });
+  } catch (e) {
+    // не критично
   }
 }
 
@@ -281,15 +295,22 @@ function trackResource(url) {
 
 function nextTrack(guildId) {
   const st = getState(guildId);
+  if (st.musicRepeat && st.lastTrack) {
+    st.musicQueue.unshift(st.lastTrack);
+  }
   const track = st.musicQueue.shift();
   if (!track) {
     st.musicActive = false;
+    st.lastTrack = null;
+    postMusicState(guildId, false);
     return;
   }
   st.musicActive = true;
+  st.lastTrack = track;
   st.musicPlayer.play(trackResource(track.url));
   log("music:", track.title);
   if (!st.currentSpeech && st.speechQueue.length === 0) subscribeTo(guildId, "music");
+  postMusicState(guildId, true);
 }
 
 function music(guildId, url, title) {
@@ -302,6 +323,8 @@ function music(guildId, url, title) {
 
 function skip(guildId) {
   const st = getState(guildId);
+  // при скипе НЕ повторяем только что пропущенный трек, даже если включён повтор
+  st.lastTrack = null;
   if (st.musicPlayer) st.musicPlayer.stop(); // Idle → nextTrack
 }
 
@@ -309,11 +332,41 @@ function stopMusic(guildId) {
   const st = getState(guildId);
   st.musicQueue = [];
   st.musicActive = false;
+  st.musicRepeat = false;
+  st.lastTrack = null;
   if (st.musicPlayer) st.musicPlayer.stop();
+  postMusicState(guildId, false);
+}
+
+function pauseMusic(guildId) {
+  const st = getState(guildId);
+  if (st.musicPlayer) st.musicPlayer.pause();
+}
+
+function resumeMusic(guildId) {
+  const st = getState(guildId);
+  if (st.musicPlayer) st.musicPlayer.unpause();
+}
+
+function setRepeat(guildId, on) {
+  getState(guildId).musicRepeat = !!on;
+}
+
+function queueList(guildId) {
+  const st = getState(guildId);
+  const current = st.lastTrack ? st.lastTrack.title : null;
+  return { current, queue: st.musicQueue.map((t) => t.title) };
 }
 
 const server = http.createServer((req, res) => {
   if (req.method === "GET") {
+    const u = new URL(req.url, "http://localhost");
+    if (u.pathname === "/queue") {
+      const guildId = u.searchParams.get("guild_id") || "";
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(queueList(guildId)));
+      return;
+    }
     res.end(`ears ok ready=${client.isReady()}`);
     return;
   }
@@ -323,12 +376,16 @@ const server = http.createServer((req, res) => {
     try {
       if (!client.isReady()) throw new Error("discord client not ready");
       const data = body ? JSON.parse(body) : {};
-      if (req.url === "/join") await join(String(data.guild_id), String(data.channel_id));
-      else if (req.url === "/leave") leave(String(data.guild_id));
-      else if (req.url === "/play") play(String(data.guild_id), data.path);
-      else if (req.url === "/music") music(String(data.guild_id), data.url, data.title);
-      else if (req.url === "/skip") skip(String(data.guild_id));
-      else if (req.url === "/stopmusic") stopMusic(String(data.guild_id));
+      const gid = String(data.guild_id);
+      if (req.url === "/join") await join(gid, String(data.channel_id));
+      else if (req.url === "/leave") leave(gid);
+      else if (req.url === "/play") play(gid, data.path);
+      else if (req.url === "/music") music(gid, data.url, data.title);
+      else if (req.url === "/skip") skip(gid);
+      else if (req.url === "/stopmusic") stopMusic(gid);
+      else if (req.url === "/pausemusic") pauseMusic(gid);
+      else if (req.url === "/resumemusic") resumeMusic(gid);
+      else if (req.url === "/repeat") setRepeat(gid, data.on);
       else {
         res.statusCode = 404;
         res.end("nope");

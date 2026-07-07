@@ -5,12 +5,13 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "v18"
+VERSION = "v19"
 status = "starting"
 
 # Хуки для событий войса (ставит bot.py). Вызываются из потока HTTP-сервера.
 on_utterance = None
 on_speaking = None
+on_music_state = None
 
 
 def full_status() -> str:
@@ -24,7 +25,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(full_status().encode())
 
     def do_POST(self):
-        if self.path not in ("/utterance", "/speaking"):
+        if self.path not in ("/utterance", "/speaking", "/music_state"):
             self.send_response(404)
             self.end_headers()
             return
@@ -38,6 +39,8 @@ class _Handler(BaseHTTPRequestHandler):
             on_utterance(data)
         elif self.path == "/speaking" and on_speaking:
             on_speaking(data)
+        elif self.path == "/music_state" and on_music_state:
+            on_music_state(data)
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ok")

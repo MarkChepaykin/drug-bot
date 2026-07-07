@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import re
 
 import httpx
@@ -9,7 +10,6 @@ _YDL_OPTS = {
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
-    "default_search": "ytsearch1",
     # мобильные/ТВ клиенты часто не требуют логина в отличие от web
     "extractor_args": {"youtube": {"player_client": ["android", "tv"]}},
 }
@@ -18,40 +18,52 @@ _http = httpx.AsyncClient(timeout=15.0, follow_redirects=True,
                           headers={"User-Agent": "Mozilla/5.0"})
 
 
+def _best_match(entries: list[dict], query: str) -> dict:
+    if len(entries) == 1:
+        return entries[0]
+    q = query.lower()
+
+    def score(e):
+        return difflib.SequenceMatcher(None, q, (e.get("title") or "").lower()).ratio()
+
+    return max(entries, key=score)
+
+
 async def resolve(query: str) -> tuple[str, str]:
     """Название/ссылка → (прямой аудио-URL, название трека)."""
     q = query.strip()
+    search_term = None
     if "open.spotify.com" in q:
         title = await _spotify_title(q)
         if not title:
             raise RuntimeError("не смог прочитать трек из Spotify-ссылки")
-        q = f"ytsearch1:{title}"
+        search_term = title
     elif "music.yandex" in q:
         title = await _yandex_title(q)
         if not title:
             raise RuntimeError("не смог прочитать трек из Яндекс-ссылки")
-        q = f"ytsearch1:{title}"
+        search_term = title
+    elif not q.startswith("http"):
+        search_term = q
 
     def _extract(target):
         with yt_dlp.YoutubeDL(_YDL_OPTS) as ydl:
             info = ydl.extract_info(target, download=False)
             if "entries" in info:
-                if not info["entries"]:
+                entries = [e for e in info["entries"] if e]
+                if not entries:
                     raise RuntimeError("ничего не нашёл")
-                info = info["entries"][0]
+                info = _best_match(entries, search_term or q)
             return info["url"], info.get("title", "трек")
 
     try:
-        return await asyncio.to_thread(_extract, q)
+        target = f"ytsearch5:{search_term}" if search_term else q
+        return await asyncio.to_thread(_extract, target)
     except Exception:
-        # YouTube упёрся — пробуем тот же запрос на SoundCloud
-        if q.startswith("ytsearch1:"):
-            term = q.split(":", 1)[1]
-        elif not q.startswith("http"):
-            term = q
-        else:
+        # YouTube упёрся (анти-бот) — пробуем тот же запрос на SoundCloud
+        if search_term is None:
             raise
-        return await asyncio.to_thread(_extract, f"scsearch1:{term}")
+        return await asyncio.to_thread(_extract, f"scsearch5:{search_term}")
 
 
 async def _spotify_title(url: str) -> str | None:

@@ -25,14 +25,29 @@ ACTIVE_WINDOW = 60
 # Мусорные фразы Whisper на шуме/тишине.
 STT_JUNK = ("субтитр", "продолжение следует", "спасибо за просмотр", "dimatorzok")
 
-# Голосовые команды музыки: "Друг, включи <трек>", "пропусти", "выключи музыку".
+# Голосовые команды музыки: "Друг, включи <трек>", "пропусти", "выключи музыку" и т.д.
+# Порядок проверки важен — специфичные паттерны идут раньше общего PLAY_RE.
+PAUSE_RE = re.compile(r"\bпауза\b|останови\s+трек|стоп\s+трек", re.IGNORECASE)
+RESUME_RE = re.compile(r"\b(?:продолжи|возобнови|плей)\b", re.IGNORECASE)
+REPEAT_OFF_RE = re.compile(r"\b(?:выключи|сними|убери)\b.*\bповтор", re.IGNORECASE)
+REPEAT_ON_RE = re.compile(r"\b(?:повтори|зацикли|повторяй)\b|на\s+повторе", re.IGNORECASE)
+SKIP_RE = re.compile(r"\b(?:скип|пропусти|следующ\w*)\b", re.IGNORECASE)
+STOP_RE = re.compile(r"\b(?:выключи|останови|хватит)\b.*\bмузык", re.IGNORECASE)
+RADIO_RE = re.compile(
+    r"\b(?:включи|поставь|запусти|давай|врубай|вруби)\b.{0,15}\b(?:волну|радио|плейлист)\b"
+    r"|\b(?:волну|радио|плейлист)\b.{0,15}\b(?:включи|поставь|запусти|давай|врубай|вруби)\b",
+    re.IGNORECASE,
+)
 PLAY_RE = re.compile(
     r"\b(?:включи|поставь|запусти|заведи|врубай|вруби)\b\s*(?:мне\s+)?"
     r"(?:музык[ауи]|песн[юяи]|трек)?\s*(.*)",
     re.IGNORECASE,
 )
-SKIP_RE = re.compile(r"\b(?:скип|пропусти|следующ\w*)\b", re.IGNORECASE)
-STOP_RE = re.compile(r"\b(?:выключи|останови|хватит)\b.*\bмузык", re.IGNORECASE)
+# "включи что-нибудь" / "поставь любую" — просят сюрприз, а не буквальный поиск этих слов.
+GENERIC_QUERY_RE = re.compile(
+    r"^(?:что.?(?:-)?нибудь|что\s+угодно|люб(?:ую|ое|ой)|как(?:ую|ое|ой)?.?нибудь)$",
+    re.IGNORECASE,
+)
 # Сколько последних реплик реально слать в LLM за раз (экономия токенов free-тарифа Groq;
 # более долгая память — через session.notes, которые сжимаются отдельно).
 RECENT_TURNS = 14
@@ -52,6 +67,10 @@ class JesterSession:
         self.last_msg_time = 0.0
         self.pending: asyncio.Task | None = None
         self.turn_direct = False
+        self.music_active = False
+        self.radio_mode = False
+        self.repeat_on = False
+        self.played_titles: deque[str] = deque(maxlen=15)
 
 
 class VoiceSelect(discord.ui.Select):
@@ -154,6 +173,7 @@ class Jester(commands.Cog):
         except Exception as e:
             await ctx.followup.send(f"Не вышло с музыкой: `{type(e).__name__}: {e}`")
             return
+        session.played_titles.append(title)
         await ctx.followup.send(f"🎵 **{title}**")
 
     @discord.slash_command(description="Пропустить текущий трек")
@@ -166,11 +186,69 @@ class Jester(commands.Cog):
 
     @discord.slash_command(description="Остановить музыку и очистить очередь")
     async def stop(self, ctx: discord.ApplicationContext):
+        session = self.sessions.get(ctx.guild.id)
+        if session:
+            session.radio_mode = False
         try:
             await ears.stop_music(ctx.guild.id)
             await ctx.respond("⏹️", ephemeral=True)
         except Exception as e:
             await ctx.respond(f"`{e}`", ephemeral=True)
+
+    @discord.slash_command(description="Поставить музыку на паузу")
+    async def pause(self, ctx: discord.ApplicationContext):
+        try:
+            await ears.pause_music(ctx.guild.id)
+            await ctx.respond("⏸️", ephemeral=True)
+        except Exception as e:
+            await ctx.respond(f"`{e}`", ephemeral=True)
+
+    @discord.slash_command(description="Продолжить воспроизведение после паузы")
+    async def resume(self, ctx: discord.ApplicationContext):
+        try:
+            await ears.resume_music(ctx.guild.id)
+            await ctx.respond("▶️", ephemeral=True)
+        except Exception as e:
+            await ctx.respond(f"`{e}`", ephemeral=True)
+
+    @discord.slash_command(description="Зациклить/расциклить текущий трек")
+    async def repeat(self, ctx: discord.ApplicationContext):
+        session = self.sessions.get(ctx.guild.id)
+        if not session:
+            await ctx.respond("Сначала позови меня в войс: /join", ephemeral=True)
+            return
+        session.repeat_on = not session.repeat_on
+        try:
+            await ears.set_repeat(ctx.guild.id, session.repeat_on)
+        except Exception as e:
+            await ctx.respond(f"`{e}`", ephemeral=True)
+            return
+        await ctx.respond("Повтор: " + ("включён 🔁" if session.repeat_on else "выключен"), ephemeral=True)
+
+    @discord.slash_command(description="Показать очередь треков")
+    async def queue(self, ctx: discord.ApplicationContext):
+        try:
+            data = await ears.queue(ctx.guild.id)
+        except Exception as e:
+            await ctx.respond(f"`{e}`", ephemeral=True)
+            return
+        lines = []
+        if data.get("current"):
+            lines.append(f"Сейчас: **{data['current']}**")
+        if data.get("queue"):
+            lines.append("Дальше: " + ", ".join(data["queue"]))
+        await ctx.respond("\n".join(lines) if lines else "Пусто.", ephemeral=True)
+
+    @discord.slash_command(description="Включить/выключить радио — сам подбирает треки по настроению")
+    async def radio(self, ctx: discord.ApplicationContext):
+        await ctx.defer()
+        session = await self._ensure_session(ctx, greet=False)
+        if not session:
+            return
+        session.radio_mode = not session.radio_mode
+        if session.radio_mode and not session.music_active:
+            await self._play_surprise(session)
+        await ctx.followup.send("Радио: " + ("включено 🎶" if session.radio_mode else "выключено"))
 
     @discord.slash_command(description="Выбрать голос бота (с озвученным превью)")
     async def voice(self, ctx: discord.ApplicationContext):
@@ -247,25 +325,71 @@ class Jester(commands.Cog):
         )
         await self._on_line(session, message.author.id, message.author.display_name, content, direct)
 
+    async def _play_surprise(self, session: JesterSession) -> bool:
+        """Сам подбирает трек по настроению/заметкам о компании — для радио и «включи что-нибудь»."""
+        try:
+            suggestion = await llm.suggest_track(session.notes, list(session.played_titles))
+            url, title = await music.resolve(suggestion)
+            await ears.music(session.guild_id, url, title)
+        except Exception as e:
+            await session.text_channel.send(f"⚠️ Не нашёл, что включить: `{type(e).__name__}: {e}`")
+            return False
+        session.played_titles.append(title)
+        await session.text_channel.send(f"🎵 **{title}**")
+        return True
+
     async def _maybe_music_command(self, session: JesterSession, text: str) -> bool:
-        if SKIP_RE.search(text.lower()):
+        low = text.lower()
+        if PAUSE_RE.search(low):
+            try:
+                await ears.pause_music(session.guild_id)
+            except Exception:
+                pass
+            return True
+        if RESUME_RE.search(low):
+            try:
+                await ears.resume_music(session.guild_id)
+            except Exception:
+                pass
+            return True
+        if REPEAT_OFF_RE.search(low):
+            session.repeat_on = False
+            try:
+                await ears.set_repeat(session.guild_id, False)
+            except Exception:
+                pass
+            return True
+        if REPEAT_ON_RE.search(low):
+            session.repeat_on = True
+            try:
+                await ears.set_repeat(session.guild_id, True)
+            except Exception:
+                pass
+            return True
+        if SKIP_RE.search(low):
             try:
                 await ears.skip(session.guild_id)
             except Exception:
                 pass
             return True
-        if STOP_RE.search(text.lower()):
+        if STOP_RE.search(low):
+            session.radio_mode = False
             try:
                 await ears.stop_music(session.guild_id)
             except Exception:
                 pass
             return True
+        if RADIO_RE.search(text):
+            session.radio_mode = True
+            if not session.music_active:
+                await self._play_surprise(session)
+            return True
         m = PLAY_RE.search(text)
         if not m:
             return False
         query = m.group(1).strip(" .,!?—-")
-        if not query:
-            await self._speak(session, "Какую песню?")
+        if not query or GENERIC_QUERY_RE.match(query):
+            await self._play_surprise(session)
             return True
         try:
             url, title = await music.resolve(query)
@@ -273,15 +397,28 @@ class Jester(commands.Cog):
         except Exception as e:
             await session.text_channel.send(f"⚠️ Не вышло с музыкой: `{type(e).__name__}: {e}`")
             return True
+        session.played_titles.append(title)
         await session.text_channel.send(f"🎵 **{title}**")
         await self._speak(session, f"Включаю {title}")
         return True
+
+    async def handle_music_state(self, data: dict):
+        session = self.sessions.get(int(data["guild_id"]))
+        if not session or not session.active:
+            return
+        session.music_active = bool(data.get("active"))
+        if not session.music_active and session.radio_mode:
+            await self._play_surprise(session)
 
     async def _on_line(self, session: JesterSession, author_id: int, name: str, text: str, direct: bool):
         now = time.monotonic()
         session.authors[author_id] = now
         session.last_msg_time = now
         if await self._maybe_music_command(session, text):
+            return
+        if session.music_active and not direct:
+            # во время трека реагируем только на прямое обращение по имени — иначе
+            # велик риск отвечать на подхваченные микрофоном звуки самой песни
             return
         session.history.append({"role": "user", "content": f"{name}: {text}"})
         session.turn_direct = session.turn_direct or direct
