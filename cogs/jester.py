@@ -24,6 +24,15 @@ GROUP_GAP = 7
 ACTIVE_WINDOW = 60
 # Мусорные фразы Whisper на шуме/тишине.
 STT_JUNK = ("субтитр", "продолжение следует", "спасибо за просмотр", "dimatorzok")
+
+# Голосовые команды музыки: "Друг, включи <трек>", "пропусти", "выключи музыку".
+PLAY_RE = re.compile(
+    r"\b(?:включи|поставь|запусти|заведи|врубай|вруби)\b\s*(?:мне\s+)?"
+    r"(?:музык[ауи]|песн[юяи]|трек)?\s*(.*)",
+    re.IGNORECASE,
+)
+SKIP_RE = re.compile(r"\b(?:скип|пропусти|следующ\w*)\b", re.IGNORECASE)
+STOP_RE = re.compile(r"\b(?:выключи|останови|хватит)\b.*\bмузык", re.IGNORECASE)
 # Сколько последних реплик реально слать в LLM за раз (экономия токенов free-тарифа Groq;
 # более долгая память — через session.notes, которые сжимаются отдельно).
 RECENT_TURNS = 14
@@ -238,11 +247,43 @@ class Jester(commands.Cog):
         )
         await self._on_line(session, message.author.id, message.author.display_name, content, direct)
 
+    async def _maybe_music_command(self, session: JesterSession, text: str) -> bool:
+        if SKIP_RE.search(text.lower()):
+            try:
+                await ears.skip(session.guild_id)
+            except Exception:
+                pass
+            return True
+        if STOP_RE.search(text.lower()):
+            try:
+                await ears.stop_music(session.guild_id)
+            except Exception:
+                pass
+            return True
+        m = PLAY_RE.search(text)
+        if not m:
+            return False
+        query = m.group(1).strip(" .,!?—-")
+        if not query:
+            await self._speak(session, "Какую песню?")
+            return True
+        try:
+            url, title = await music.resolve(query)
+            await ears.music(session.guild_id, url, title)
+        except Exception as e:
+            await session.text_channel.send(f"⚠️ Не вышло с музыкой: `{type(e).__name__}: {e}`")
+            return True
+        await session.text_channel.send(f"🎵 **{title}**")
+        await self._speak(session, f"Включаю {title}")
+        return True
+
     async def _on_line(self, session: JesterSession, author_id: int, name: str, text: str, direct: bool):
         now = time.monotonic()
-        session.history.append({"role": "user", "content": f"{name}: {text}"})
-        session.last_msg_time = now
         session.authors[author_id] = now
+        session.last_msg_time = now
+        if await self._maybe_music_command(session, text):
+            return
+        session.history.append({"role": "user", "content": f"{name}: {text}"})
         session.turn_direct = session.turn_direct or direct
         session.lines_since_sum += 1
         if session.lines_since_sum >= 25:
