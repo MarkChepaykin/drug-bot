@@ -14,8 +14,11 @@ from services import ears, llm, music, stt, tts
 # Голосом (соединение, приём и проигрывание) управляет Node-сервис ears
 # (discord.js + DAVE E2EE). Python — мозг: STT, персона, решения когда говорить.
 
+# Сколько секунд тишины ждать перед ответом в диалоге 1:1 — даёт человеку закончить
+# мысль, а не отвечать на каждый обрывок фразы (речь режется на куски по паузам).
+TURN_GAP = 1.8
 # Сколько секунд тишины ждать перед репликой, когда говорят несколько человек.
-QUIET_SECONDS = 8
+GROUP_GAP = 8
 # Автор считается активным участником, если говорил/писал в последние N секунд.
 ACTIVE_WINDOW = 60
 # Мусорные фразы Whisper на шуме/тишине.
@@ -35,6 +38,7 @@ class JesterSession:
         self.authors: dict[int, float] = {}
         self.last_msg_time = 0.0
         self.pending: asyncio.Task | None = None
+        self.turn_direct = False
 
 
 class VoiceSelect(discord.ui.Select):
@@ -226,37 +230,45 @@ class Jester(commands.Cog):
         session.history.append({"role": "user", "content": f"{name}: {text}"})
         session.last_msg_time = now
         session.authors[author_id] = now
+        session.turn_direct = session.turn_direct or direct
         session.lines_since_sum += 1
         if session.lines_since_sum >= 25:
             session.lines_since_sum = 0
             self.bot.loop.create_task(self._compact(session))
-        active = sum(1 for t in session.authors.values() if now - t < ACTIVE_WINDOW)
-        if direct or active <= 1:
-            # обращение или разговор один на один — отвечаем сразу
-            if session.pending:
-                session.pending.cancel()
-                session.pending = None
-            try:
-                reply = await llm.voice_chat(list(session.history), session.notes)
-            except Exception as e:
-                await session.text_channel.send(f"⚠️ Мозг не ответил: `{type(e).__name__}: {e}`")
-                return
-            session.history.append({"role": "assistant", "content": reply})
-            await self._speak(session, reply)
-        elif not session.pending or session.pending.done():
-            # оживлённый разговор — ждём тишины и вставляем одну реплику
-            session.pending = self.bot.loop.create_task(self._wait_quiet(session))
+        # Любая новая реплика (в т.ч. продолжение той же мысли после короткой паузы)
+        # перезапускает ожидание — отвечаем только когда человек реально закончил.
+        if session.pending and not session.pending.done():
+            session.pending.cancel()
+        session.pending = self.bot.loop.create_task(self._wait_turn(session))
 
-    async def _wait_quiet(self, session: JesterSession):
+    async def _wait_turn(self, session: JesterSession):
         try:
-            while time.monotonic() - session.last_msg_time < QUIET_SECONDS:
-                await asyncio.sleep(1)
-            if session.active:
+            while True:
+                active = sum(1 for t in session.authors.values() if time.monotonic() - t < ACTIVE_WINDOW)
+                gap = TURN_GAP if (session.turn_direct or active <= 1) else GROUP_GAP
+                remaining = gap - (time.monotonic() - session.last_msg_time)
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(remaining, 1))
+            if not session.active:
+                return
+            direct = session.turn_direct
+            session.turn_direct = False
+            active = sum(1 for t in session.authors.values() if time.monotonic() - t < ACTIVE_WINDOW)
+            if direct or active <= 1:
+                try:
+                    reply = await llm.voice_chat(list(session.history), session.notes)
+                except Exception as e:
+                    await session.text_channel.send(f"⚠️ Мозг не ответил: `{type(e).__name__}: {e}`")
+                    return
+                session.history.append({"role": "assistant", "content": reply})
+                await self._speak(session, reply)
+            else:
                 await self._interject(session)
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            print(f"[jester] quiet-wait error: {e!r}")
+            print(f"[jester] turn-wait error: {e!r}")
 
     async def _compact(self, session: JesterSession):
         """Сжимает разговор в долгие заметки о компании."""

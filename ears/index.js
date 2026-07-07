@@ -22,7 +22,7 @@ const EARS_PORT = parseInt(process.env.EARS_PORT || "8300", 10);
 const BRAIN_PORT = parseInt(process.env.PORT || "10000", 10);
 const EARS_TOKEN = process.env.EARS_TOKEN || "dev";
 const BYTES_PER_SEC = 48000 * 2 * 2; // 48кГц стерео 16бит
-const MIN_PCM_BYTES = Math.floor(BYTES_PER_SEC * 0.25);
+const MIN_PCM_BYTES = Math.floor(BYTES_PER_SEC * 0.4);
 const MAX_PCM_BYTES = BYTES_PER_SEC * 30;
 
 const log = (...a) => console.log("[ears]", ...a);
@@ -99,7 +99,7 @@ function subscribeUser(conn, guildId, userId) {
   st.subs.add(userId);
 
   const opus = conn.receiver.subscribe(userId, {
-    end: { behavior: EndBehaviorType.AfterSilence, duration: 900 },
+    end: { behavior: EndBehaviorType.AfterSilence, duration: 1100 },
   });
   const dec = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
   const chunks = [];
