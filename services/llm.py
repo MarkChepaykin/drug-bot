@@ -1,9 +1,12 @@
 import asyncio
+import re
 
 import httpx
-from groq import Groq
+from groq import Groq, RateLimitError
 
 import config
+
+_NAME_PREFIX = re.compile(r"^[A-Za-zА-Яа-яЁё][\w -]{1,20}:\s*")
 
 _kwargs = {"api_key": config.GROQ_API_KEY}
 if config.GROQ_PROXY:
@@ -31,14 +34,16 @@ VOICE_CHAT_SYSTEM = PERSONA + (
     "(распознавание может ошибаться и терять слова — догадывайся по смыслу, не переспрашивай "
     "по мелочи и не придирайся к неровностям текста). Отвечай КОРОТКО, максимум 1-2 фразы, "
     "как в живом голосовом созвоне — не читай лекцию и не растекайся мыслью. "
-    "Только устная речь: без эмодзи, разметки, списков и ремарок в скобках."
+    "Свой ответ пиши БЕЗ «Имя:» в начале — этот формат только во входящих сообщениях, "
+    "ты говоришь от себя напрямую. Только устная речь: без эмодзи, разметки, списков и ремарок в скобках."
 )
 
 INTERJECT_SYSTEM = PERSONA + (
     " Ты в голосовом канале, следишь за разговором. Никто к тебе не обращался — ты сам решил "
     "вклиниться как участник: развей тему, добавь свою мысль или факт, вспомни, что говорили "
     "раньше, задай интересный вопрос или к месту подколи. Не пересказывай разговор и не "
-    "рассказывай анекдоты. Максимум одна короткая фраза устной речи, без эмодзи и ремарок."
+    "рассказывай анекдоты. Свой ответ пиши БЕЗ «Имя:» в начале, говори от себя напрямую. "
+    "Максимум одна короткая фраза устной речи, без эмодзи и ремарок."
 )
 
 CHAT_SYSTEM = PERSONA + " Отвечай коротко и по делу, на русском."
@@ -72,8 +77,15 @@ async def chat(history: list[dict], system: str = CHAT_SYSTEM, max_tokens: int =
             messages=[{"role": "system", "content": system}] + history,
         )
 
-    resp = await asyncio.to_thread(_call)
-    return resp.choices[0].message.content.strip()
+    try:
+        resp = await asyncio.to_thread(_call)
+    except RateLimitError:
+        # free-тариф Groq — короткие лимиты токенов/мин, ждём и пробуем один раз ещё
+        await asyncio.sleep(5)
+        resp = await asyncio.to_thread(_call)
+    text = resp.choices[0].message.content.strip()
+    # иногда модель по инерции копирует формат "Имя: текст" из истории — срезаем
+    return _NAME_PREFIX.sub("", text, count=1)
 
 
 async def voice_chat(history: list[dict], notes: str = "") -> str:

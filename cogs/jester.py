@@ -23,6 +23,9 @@ GROUP_GAP = 8
 ACTIVE_WINDOW = 60
 # Мусорные фразы Whisper на шуме/тишине.
 STT_JUNK = ("субтитр", "продолжение следует", "спасибо за просмотр", "dimatorzok")
+# Сколько последних реплик реально слать в LLM за раз (экономия токенов free-тарифа Groq;
+# более долгая память — через session.notes, которые сжимаются отдельно).
+RECENT_TURNS = 14
 
 
 class JesterSession:
@@ -257,7 +260,7 @@ class Jester(commands.Cog):
             active = sum(1 for t in session.authors.values() if time.monotonic() - t < ACTIVE_WINDOW)
             if direct or active <= 1:
                 try:
-                    reply = await llm.voice_chat(list(session.history), session.notes)
+                    reply = await llm.voice_chat(list(session.history)[-RECENT_TURNS:], session.notes)
                 except Exception as e:
                     await session.text_channel.send(f"⚠️ Мозг не ответил: `{type(e).__name__}: {e}`")
                     return
@@ -272,7 +275,7 @@ class Jester(commands.Cog):
 
     async def _compact(self, session: JesterSession):
         """Сжимает разговор в долгие заметки о компании."""
-        lines = [m["content"] for m in list(session.history) if m["role"] == "user"]
+        lines = [m["content"] for m in list(session.history) if m["role"] == "user"][-25:]
         try:
             session.notes = await llm.summarize(session.notes, lines)
             print(f"[jester] заметки обновлены ({len(session.notes)} символов)", flush=True)
@@ -280,7 +283,7 @@ class Jester(commands.Cog):
             print(f"[jester] summarize error: {e!r}")
 
     async def _interject(self, session: JesterSession):
-        reply = await llm.interject(list(session.history), session.notes)
+        reply = await llm.interject(list(session.history)[-RECENT_TURNS:], session.notes)
         session.history.append({"role": "assistant", "content": reply})
         await self._speak(session, reply)
 
