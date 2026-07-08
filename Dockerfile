@@ -14,14 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # build-essential нужен только на случай сборки нативных модулей из исходников
 COPY ears/package.json ears/package-lock.json ears/
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential git \
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
     && cd ears && npm install --omit=dev --no-audit --no-fund \
-    && cd /app && git clone --single-branch --branch 1.3.1 --depth 1 \
-        https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git potprovider_src \
-    && cd potprovider_src/server && npm ci && npx tsc \
-    && mkdir -p /app/potprovider && cp -r build /app/potprovider/build \
-    && cd /app && rm -rf potprovider_src \
-    && apt-get purge -y build-essential git && apt-get autoremove -y \
+    && apt-get purge -y build-essential && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
