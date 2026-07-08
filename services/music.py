@@ -1,18 +1,29 @@
 import asyncio
 import difflib
+import os
 import re
 
 import httpx
 import yt_dlp
+
+# Куки настоящего YouTube-аккаунта (рекомендуется отдельный/burner, не основной —
+# см. предупреждение в README) снимают часть анти-бот проверок. Кладутся как
+# Render Secret File с именем youtube_cookies.txt (монтируется в /etc/secrets/),
+# либо локально рядом с проектом для разработки.
+_COOKIE_PATHS = ["/etc/secrets/youtube_cookies.txt", "youtube_cookies.txt"]
+_cookiefile = next((p for p in _COOKIE_PATHS if os.path.isfile(p)), None)
 
 _YDL_OPTS = {
     "format": "bestaudio[abr<=128]/bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
-    # мобильные/ТВ клиенты часто не требуют логина в отличие от web
-    "extractor_args": {"youtube": {"player_client": ["android", "tv"]}},
+    # PO-токен (bgutil, локальный сервис на 4416) — обходит часть анти-бот проверок
+    # без куков; вместе с куками (если есть) даёт максимум шансов достучаться до YouTube.
+    "extractor_args": {"youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]}},
 }
+if _cookiefile:
+    _YDL_OPTS["cookiefile"] = _cookiefile
 
 _http = httpx.AsyncClient(timeout=15.0, follow_redirects=True,
                           headers={"User-Agent": "Mozilla/5.0"})

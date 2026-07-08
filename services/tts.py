@@ -17,7 +17,7 @@ VOICES = {
     "Робот 🤖": {"engine": "espeak"},
 }
 
-DEFAULT_VOICE_KEY = "Обычный"
+DEFAULT_VOICE_KEY = "Американец 🇺🇸"
 
 PREVIEWS = {
     "Обычный": "Так, вернул нормальный голос. Все выдохнули.",

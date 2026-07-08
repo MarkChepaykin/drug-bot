@@ -54,10 +54,11 @@ RECENT_TURNS = 14
 
 
 class JesterSession:
-    def __init__(self, guild_id, text_channel, voice_key):
+    def __init__(self, guild_id, text_channel, voice_key, voice_channel_id):
         self.guild_id = guild_id
         self.text_channel = text_channel
         self.voice_key = voice_key
+        self.voice_channel_id = voice_channel_id
         self.active = True
         self.last_err = 0.0
         self.history = deque(maxlen=40)
@@ -120,18 +121,55 @@ class Jester(commands.Cog):
         except Exception as e:
             await ctx.followup.send(f"Не смог подключиться к голосу: `{type(e).__name__}: {e}`")
             return None
-        session = JesterSession(ctx.guild.id, ctx.channel, self.default_voice_key)
+        session = JesterSession(ctx.guild.id, ctx.channel, self.default_voice_key, channel.id)
         self.sessions[ctx.guild.id] = session
         if greet:
             names = [m.display_name for m in channel.members if not m.bot]
             self.bot.loop.create_task(self._greet(session, names))
         return session
 
+    async def _report_error(self, session: JesterSession, prefix: str, e: Exception):
+        """Шлёт ⚠️ в канал, но не чаще раза в минуту — иначе при затяжном сбое (например,
+        суточный лимит Groq) канал заваливает одинаковыми сообщениями."""
+        now = time.monotonic()
+        if now - session.last_err < 60:
+            print(f"[jester] {prefix}: {e!r} (подавлено, недавно уже сообщал)", flush=True)
+            return
+        session.last_err = now
+        await session.text_channel.send(f"⚠️ {prefix}: `{type(e).__name__}: {e}`")
+
+    async def _leave_session(self, guild_id: int, session: "JesterSession", reason: str):
+        session.active = False
+        if session.pending:
+            session.pending.cancel()
+        try:
+            await ears.leave(guild_id)
+        except Exception:
+            pass
+        self.sessions.pop(guild_id, None)
+        print(f"[jester] вышел из {guild_id}: {reason}", flush=True)
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        if member.bot:
+            return
+        session = self.sessions.get(member.guild.id)
+        if not session or not session.active:
+            return
+        channel_ids = {getattr(before.channel, "id", None), getattr(after.channel, "id", None)}
+        if session.voice_channel_id not in channel_ids:
+            return
+        channel = self.bot.get_channel(session.voice_channel_id)
+        if not channel or any(not m.bot for m in channel.members):
+            return
+        # все люди вышли — не сидим в пустом канале, отвечая на шум/эхо всю ночь
+        await self._leave_session(member.guild.id, session, "канал опустел")
+
     async def _greet(self, session: JesterSession, names: list[str]):
         try:
             hello = await llm.greeting(names, session.notes)
         except Exception as e:
-            await session.text_channel.send(f"⚠️ Мозг не ответил: `{type(e).__name__}: {e}`")
+            await self._report_error(session, "Мозг не ответил", e)
             return
         session.history.append({"role": "assistant", "content": hello})
         await self._speak(session, hello)
@@ -148,17 +186,11 @@ class Jester(commands.Cog):
 
     @discord.slash_command(description="Выйти из голосового канала")
     async def leave(self, ctx: discord.ApplicationContext):
-        session = self.sessions.pop(ctx.guild.id, None)
+        session = self.sessions.get(ctx.guild.id)
         if not session:
             await ctx.respond("Меня и так нет в войсе.", ephemeral=True)
             return
-        session.active = False
-        if session.pending:
-            session.pending.cancel()
-        try:
-            await ears.leave(ctx.guild.id)
-        except Exception:
-            pass
+        await self._leave_session(ctx.guild.id, session, "/leave")
         await ctx.respond("Вышел. 👋")
 
     @discord.slash_command(description="Включить музыку: название или ссылка (YouTube/Spotify/Яндекс)")
@@ -332,7 +364,7 @@ class Jester(commands.Cog):
             url, title = await music.resolve(suggestion)
             await ears.music(session.guild_id, url, title)
         except Exception as e:
-            await session.text_channel.send(f"⚠️ Не нашёл, что включить: `{type(e).__name__}: {e}`")
+            await self._report_error(session, "Не нашёл, что включить", e)
             return False
         session.played_titles.append(title)
         await session.text_channel.send(f"🎵 **{title}**")
@@ -395,7 +427,7 @@ class Jester(commands.Cog):
             url, title = await music.resolve(query)
             await ears.music(session.guild_id, url, title)
         except Exception as e:
-            await session.text_channel.send(f"⚠️ Не вышло с музыкой: `{type(e).__name__}: {e}`")
+            await self._report_error(session, "Не вышло с музыкой", e)
             return True
         session.played_titles.append(title)
         await session.text_channel.send(f"🎵 **{title}**")
@@ -450,12 +482,15 @@ class Jester(commands.Cog):
                 try:
                     reply = await llm.voice_chat(list(session.history)[-RECENT_TURNS:], session.notes)
                 except Exception as e:
-                    await session.text_channel.send(f"⚠️ Мозг не ответил: `{type(e).__name__}: {e}`")
+                    await self._report_error(session, "Мозг не ответил", e)
                     return
                 session.history.append({"role": "assistant", "content": reply})
                 await self._speak(session, reply)
             else:
-                await self._interject(session)
+                try:
+                    await self._interject(session)
+                except Exception as e:
+                    await self._report_error(session, "Мозг не ответил", e)
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -481,7 +516,7 @@ class Jester(commands.Cog):
             await tts.synthesize(text, path, session.voice_key)
             await ears.play(session.guild_id, path)
         except Exception as e:
-            await session.text_channel.send(f"⚠️ Озвучка не сработала: `{type(e).__name__}: {e}`")
+            await self._report_error(session, "Озвучка не сработала", e)
 
 
 def setup(bot):

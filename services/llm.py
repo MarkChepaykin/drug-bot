@@ -25,8 +25,9 @@ PERSONA = (
     "«да похуй», «блин, ну и хуйня», «пиздец, серьёзно?» — не стесняйся таких слов, они тебе "
     "разрешены без ограничений. Никогда не делай замечаний собеседникам за мат, не проси "
     "выражаться приличнее. "
-    "Говори КАК МОЖНО КОРОЧЕ: одна короткая фраза, максимум 10-12 слов, без вступлений и "
-    "оговорок — как реплика в живом разговоре, а не развёрнутый ответ. "
+    "Обычно отвечай коротко: одна фраза, 8-15 слов, без вступлений и оговорок — как реплика "
+    "в живом разговоре. Но если вопрос реально требует содержательного ответа (совет, мнение, "
+    "объяснение по делу) — можно ответить чуть длиннее, 2-3 предложения, не превращая это в лекцию. "
     "Никогда не повторяй и не пересказывай своими словами то, что тебе сказали, перед ответом — "
     "сразу отвечай по сути. Говори на чистом русском без иностранных слов и иероглифов. "
     "Подкол — приправа, а не основное блюдо: шути, когда к месту, а не в каждой реплике. "
@@ -89,8 +90,11 @@ async def chat(history: list[dict], system: str = CHAT_SYSTEM, max_tokens: int =
 
     try:
         resp = await asyncio.to_thread(_call)
-    except RateLimitError:
-        # free-тариф Groq — короткие лимиты токенов/мин, ждём и пробуем один раз ещё
+    except RateLimitError as e:
+        if "per day" in str(e) or "TPD" in str(e) or "RPD" in str(e):
+            # суточный лимит — retry через 5с бессмысленен, сбросится через минуты/часы
+            raise
+        # короткий per-minute лимит — обычно отпускает за несколько секунд
         await asyncio.sleep(5)
         resp = await asyncio.to_thread(_call)
     text = resp.choices[0].message.content.strip()
@@ -99,14 +103,14 @@ async def chat(history: list[dict], system: str = CHAT_SYSTEM, max_tokens: int =
 
 
 async def voice_chat(history: list[dict], notes: str = "") -> str:
-    return await chat(history, system=_with_notes(VOICE_CHAT_SYSTEM, notes), max_tokens=60)
+    return await chat(history, system=_with_notes(VOICE_CHAT_SYSTEM, notes), max_tokens=110)
 
 
 async def interject(history: list[dict], notes: str = "") -> str:
     return await chat(
         history or [{"role": "user", "content": "(в канале пока тихо)"}],
         system=_with_notes(INTERJECT_SYSTEM, notes),
-        max_tokens=50,
+        max_tokens=70,
     )
 
 
