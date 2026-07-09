@@ -24,6 +24,7 @@ _YDL_OPTS = {
     # PO-токен (bgutil, локальный сервис на 4416) — обходит часть анти-бот проверок
     # без куков; вместе с куками (если есть) даёт максимум шансов достучаться до YouTube.
     "extractor_args": {"youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]}},
+    "socket_timeout": 12,
 }
 if _cookiefile:
     _YDL_OPTS["cookiefile"] = _cookiefile
@@ -31,8 +32,15 @@ if _cookiefile:
 # Запрос к YouTube отдельно идёт через локальный Cloudflare WARP SOCKS5 (start.sh) —
 # его IP не считается датацентровым. Если WARP не поднялся, просто получим ошибку
 # соединения и уйдём в SoundCloud-фоллбек НИЖЕ ЧЕРЕЗ ОБЫЧНОЕ соединение, без прокси —
-# так падение WARP никогда не ломает то, что и так работало.
-_YDL_OPTS_YOUTUBE = {**_YDL_OPTS, "proxy": "socks5://127.0.0.1:40000"}
+# так падение WARP никогда не ломает то, что и так работало. Короткий таймаут и без
+# повторов — если прокси тормозит, лучше быстро уйти в фоллбек, чем виснуть минуту.
+_YDL_OPTS_YOUTUBE = {
+    **_YDL_OPTS,
+    "proxy": "socks5://127.0.0.1:40000",
+    "socket_timeout": 6,
+    "extractor_retries": 0,
+    "retries": 0,
+}
 
 _http = httpx.AsyncClient(timeout=15.0, follow_redirects=True,
                           headers={"User-Agent": "Mozilla/5.0"})

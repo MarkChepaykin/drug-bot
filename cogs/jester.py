@@ -516,24 +516,39 @@ class Jester(commands.Cog):
         return True
 
     async def _queue_fill(self, session: JesterSession, count: int):
-        """Набивает очередь несколькими треками разом — не спрашивать песню на каждый заход."""
+        """Набивает очередь несколькими треками разом — не спрашивать песню на каждый заход.
+        Резолвит несколько треков параллельно (не по одному), иначе первый трек ждёт,
+        пока не найдутся вообще все, и музыка не играет, пока идёт подбор."""
         ok = 0
         attempts = 0
         max_attempts = count * 3  # часть подсказок не резолвится — с запасом попыток
-        while ok < count and attempts < max_attempts:
-            attempts += 1
-            try:
-                suggestion = await llm.suggest_track(session.notes, list(session.played_titles))
-                url, title = await music.resolve(suggestion)
-            except Exception:
-                continue
-            try:
-                await ears.music(session.guild_id, url, title)
-            except Exception as e:
-                await self._report_error(session, "Очередь не собралась", e)
-                return
-            session.played_titles.append(title)
-            ok += 1
+        state_lock = asyncio.Lock()
+        stop = False
+
+        async def worker():
+            nonlocal ok, attempts, stop
+            while True:
+                async with state_lock:
+                    if stop or ok >= count or attempts >= max_attempts:
+                        return
+                    attempts += 1
+                try:
+                    suggestion = await llm.suggest_track(session.notes, list(session.played_titles))
+                    url, title = await music.resolve(suggestion)
+                except Exception:
+                    continue
+                try:
+                    await ears.music(session.guild_id, url, title)
+                except Exception as e:
+                    async with state_lock:
+                        stop = True
+                    await self._report_error(session, "Очередь не собралась", e)
+                    return
+                async with state_lock:
+                    session.played_titles.append(title)
+                    ok += 1
+
+        await asyncio.gather(*(worker() for _ in range(min(3, count))))
         await session.text_channel.send(f"🎵 Добавил {ok} треков в очередь" if ok else "⚠️ Не нашёл, что добавить")
 
     async def handle_music_state(self, data: dict):
