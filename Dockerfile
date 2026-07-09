@@ -5,7 +5,7 @@ FROM python:3.12-slim-bookworm
 COPY --from=nodesrc /usr/local/bin/node /usr/local/bin/node
 COPY --from=nodesrc /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && apt-get update && apt-get install -y --no-install-recommends ffmpeg libopus0 espeak-ng curl \
+    && apt-get update && apt-get install -y --no-install-recommends ffmpeg libopus0 espeak-ng curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 # PO-token сервис для yt-dlp (обход анти-бота YouTube) — готовый статический бинарник
