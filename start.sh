@@ -6,6 +6,22 @@ export EARS_TOKEN="${EARS_TOKEN:-$(python -c 'import secrets; print(secrets.toke
 # в цикле, не роняя весь бот и голосовую сессию.
 (while true; do bgutil-pot server; sleep 5; done) &
 
+# Cloudflare WARP как SOCKS5-прокси (services/music.py) для запросов к YouTube — тоже
+# второстепенный: не поднимется — просто продолжаем работать через SoundCloud как раньше.
+(
+  while true; do
+    warp-svc --accept-tos &
+    WARP_SVC_PID=$!
+    sleep 3
+    warp-cli --accept-tos registration new >/dev/null 2>&1
+    warp-cli --accept-tos mode proxy >/dev/null 2>&1
+    warp-cli --accept-tos proxy port 40000 >/dev/null 2>&1
+    warp-cli --accept-tos connect >/dev/null 2>&1
+    wait "$WARP_SVC_PID"
+    sleep 5
+  done
+) &
+
 node ears/index.js &
 python bot.py &
 

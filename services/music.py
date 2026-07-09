@@ -28,6 +28,12 @@ _YDL_OPTS = {
 if _cookiefile:
     _YDL_OPTS["cookiefile"] = _cookiefile
 
+# Запрос к YouTube отдельно идёт через локальный Cloudflare WARP SOCKS5 (start.sh) —
+# его IP не считается датацентровым. Если WARP не поднялся, просто получим ошибку
+# соединения и уйдём в SoundCloud-фоллбек НИЖЕ ЧЕРЕЗ ОБЫЧНОЕ соединение, без прокси —
+# так падение WARP никогда не ломает то, что и так работало.
+_YDL_OPTS_YOUTUBE = {**_YDL_OPTS, "proxy": "socks5://127.0.0.1:40000"}
+
 _http = httpx.AsyncClient(timeout=15.0, follow_redirects=True,
                           headers={"User-Agent": "Mozilla/5.0"})
 
@@ -71,8 +77,8 @@ async def resolve(query: str) -> tuple[str, str]:
     elif not q.startswith("http"):
         search_term = q
 
-    def _extract(target):
-        with yt_dlp.YoutubeDL(_YDL_OPTS) as ydl:
+    def _extract(target, opts):
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(target, download=False)
             if "entries" in info:
                 entries = [e for e in info["entries"] if e]
@@ -83,12 +89,15 @@ async def resolve(query: str) -> tuple[str, str]:
 
     try:
         target = f"ytsearch5:{search_term}" if search_term else q
-        return await asyncio.to_thread(_extract, target)
+        # Прямые не-YouTube ссылки (например SoundCloud) прокси не нужен.
+        yt_opts = _YDL_OPTS_YOUTUBE if (search_term or "youtube" in q or "youtu.be" in q) else _YDL_OPTS
+        return await asyncio.to_thread(_extract, target, yt_opts)
     except Exception:
-        # YouTube упёрся (анти-бот) — пробуем тот же запрос на SoundCloud
+        # YouTube упёрся (анти-бот/WARP не поднялся) — пробуем тот же запрос на SoundCloud
+        # НАПРЯМУЮ, без прокси, чтобы не зависеть от состояния WARP.
         if search_term is None:
             raise
-        return await asyncio.to_thread(_extract, f"scsearch5:{search_term}")
+        return await asyncio.to_thread(_extract, f"scsearch5:{search_term}", _YDL_OPTS)
 
 
 async def _spotify_title(url: str) -> str | None:
