@@ -10,7 +10,7 @@ export EARS_TOKEN="${EARS_TOKEN:-$(python -c 'import secrets; print(secrets.toke
 # второстепенный: не поднимется — просто продолжаем работать через SoundCloud как раньше.
 (
   while true; do
-    warp-svc --accept-tos &
+    warp-svc --accept-tos >/dev/null 2>&1 &
     WARP_SVC_PID=$!
     sleep 3
     warp-cli --accept-tos registration new >/dev/null 2>&1
