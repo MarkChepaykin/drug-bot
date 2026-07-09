@@ -12,8 +12,8 @@ _client = Groq(**_kwargs)
 
 # Whisper любит "додумывать" фразы на тишине/шуме. Отсекаем сегменты, где сама
 # модель уверена, что речи не было, или транскрипция крайне неуверенная.
-NO_SPEECH_THRESHOLD = 0.6
-LOGPROB_THRESHOLD = -1.0
+NO_SPEECH_THRESHOLD = 0.5
+LOGPROB_THRESHOLD = -0.9
 
 
 async def transcribe(wav_bytes: bytes) -> str:

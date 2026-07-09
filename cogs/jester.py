@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import os
 import re
 import tempfile
@@ -23,12 +24,23 @@ GROUP_GAP = 7
 # Автор считается активным участником, если говорил/писал в последние N секунд.
 ACTIVE_WINDOW = 60
 # Мусорные фразы Whisper на шуме/тишине.
-STT_JUNK = ("субтитр", "продолжение следует", "спасибо за просмотр", "dimatorzok")
+STT_JUNK = (
+    "субтитр", "продолжение следует", "спасибо за просмотр", "dimatorzok",
+    "подпишись", "подписывайтесь", "ставьте лайк", "лайк и подписка",
+    "до новых встреч", "спасибо за внимание", "редактор субтитров", "корректор",
+)
+# Если новая реплика бота почти совпадает с одной из недавних — не повторяемся вслух.
+REPEAT_SIMILARITY = 0.78
 
 # Голосовые команды музыки: "Друг, включи <трек>", "пропусти", "выключи музыку" и т.д.
 # Порядок проверки важен — специфичные паттерны идут раньше общего PLAY_RE.
 SLEEP_TIMER_RE = re.compile(
     r"\b(?:выключи|останови)\b.*\bмузык\w*.*?через\s+(\d+)\s*(минут\w*|час\w*)", re.IGNORECASE
+)
+LEAVE_RE = re.compile(
+    r"\b(?:выйди|уйди|свали|отключись|отвались|исчезни)\b.{0,15}\b(?:войс\w*|канал\w*|чат\w*)\b"
+    r"|\bпокинь\s+(?:войс\w*|канал\w*|чат\w*)\b",
+    re.IGNORECASE,
 )
 PAUSE_RE = re.compile(r"\bпауза\b|останови\s+трек|стоп\s+трек", re.IGNORECASE)
 RESUME_RE = re.compile(r"\b(?:продолжи|возобнови|плей)\b", re.IGNORECASE)
@@ -162,6 +174,14 @@ class Jester(commands.Cog):
             pass
         self.sessions.pop(guild_id, None)
         print(f"[jester] вышел из {guild_id}: {reason}", flush=True)
+
+    async def _voice_leave(self, session: JesterSession):
+        try:
+            await self._speak(session, "Лады, ухожу.")
+            await asyncio.sleep(1.5)
+        except Exception:
+            pass
+        await self._leave_session(session.guild_id, session, "голосовая команда")
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
@@ -416,6 +436,9 @@ class Jester(commands.Cog):
 
     async def _maybe_music_command(self, session: JesterSession, text: str) -> bool:
         low = text.lower()
+        if LEAVE_RE.search(low):
+            self.bot.loop.create_task(self._voice_leave(session))
+            return True
         m = SLEEP_TIMER_RE.search(low)
         if m:
             amount, unit = int(m.group(1)), m.group(2)
@@ -524,6 +547,7 @@ class Jester(commands.Cog):
         max_attempts = count * 3  # часть подсказок не резолвится — с запасом попыток
         state_lock = asyncio.Lock()
         stop = False
+        added: list[str] = []
 
         async def worker():
             nonlocal ok, attempts, stop
@@ -546,10 +570,15 @@ class Jester(commands.Cog):
                     return
                 async with state_lock:
                     session.played_titles.append(title)
+                    added.append(title)
                     ok += 1
 
         await asyncio.gather(*(worker() for _ in range(min(3, count))))
-        await session.text_channel.send(f"🎵 Добавил {ok} треков в очередь" if ok else "⚠️ Не нашёл, что добавить")
+        if added:
+            listing = "\n".join(f"— {t}" for t in added)
+            await session.text_channel.send(f"🎵 Добавил {ok} треков в очередь:\n{listing}")
+        else:
+            await session.text_channel.send("⚠️ Не нашёл, что добавить")
 
     async def handle_music_state(self, data: dict):
         session = self.sessions.get(int(data["guild_id"]))
@@ -601,6 +630,8 @@ class Jester(commands.Cog):
                 except Exception as e:
                     await self._report_error(session, "Мозг не ответил", e)
                     return
+                if self._too_similar(session, reply):
+                    return
                 session.history.append({"role": "assistant", "content": reply})
                 await self._speak(session, reply)
             else:
@@ -624,8 +655,17 @@ class Jester(commands.Cog):
 
     async def _interject(self, session: JesterSession):
         reply = await llm.interject(list(session.history)[-RECENT_TURNS:], session.notes)
+        if self._too_similar(session, reply):
+            return
         session.history.append({"role": "assistant", "content": reply})
         await self._speak(session, reply)
+
+    def _too_similar(self, session: JesterSession, text: str) -> bool:
+        recent = [m["content"] for m in list(session.history)[-6:] if m["role"] == "assistant"]
+        return any(
+            difflib.SequenceMatcher(None, text.lower(), r.lower()).ratio() > REPEAT_SIMILARITY
+            for r in recent
+        )
 
     async def _speak(self, session: JesterSession, text: str):
         try:

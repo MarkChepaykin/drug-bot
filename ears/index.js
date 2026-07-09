@@ -23,7 +23,7 @@ const EARS_PORT = parseInt(process.env.EARS_PORT || "8300", 10);
 const BRAIN_PORT = parseInt(process.env.PORT || "10000", 10);
 const EARS_TOKEN = process.env.EARS_TOKEN || "dev";
 const BYTES_PER_SEC = 48000 * 2 * 2; // 48кГц стерео 16бит
-const MIN_PCM_BYTES = Math.floor(BYTES_PER_SEC * 0.4);
+const MIN_PCM_BYTES = Math.floor(BYTES_PER_SEC * 0.6);
 const MAX_PCM_BYTES = BYTES_PER_SEC * 30;
 
 const log = (...a) => console.log("[ears]", ...a);

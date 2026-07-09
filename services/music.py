@@ -24,23 +24,10 @@ _YDL_OPTS = {
     # PO-токен (bgutil, локальный сервис на 4416) — обходит часть анти-бот проверок
     # без куков; вместе с куками (если есть) даёт максимум шансов достучаться до YouTube.
     "extractor_args": {"youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]}},
-    "socket_timeout": 12,
+    "socket_timeout": 10,
 }
 if _cookiefile:
     _YDL_OPTS["cookiefile"] = _cookiefile
-
-# Запрос к YouTube отдельно идёт через локальный Cloudflare WARP SOCKS5 (start.sh) —
-# его IP не считается датацентровым. Если WARP не поднялся, просто получим ошибку
-# соединения и уйдём в SoundCloud-фоллбек НИЖЕ ЧЕРЕЗ ОБЫЧНОЕ соединение, без прокси —
-# так падение WARP никогда не ломает то, что и так работало. Короткий таймаут и без
-# повторов — если прокси тормозит, лучше быстро уйти в фоллбек, чем виснуть минуту.
-_YDL_OPTS_YOUTUBE = {
-    **_YDL_OPTS,
-    "proxy": "socks5://127.0.0.1:40000",
-    "socket_timeout": 6,
-    "extractor_retries": 0,
-    "retries": 0,
-}
 
 _http = httpx.AsyncClient(timeout=15.0, follow_redirects=True,
                           headers={"User-Agent": "Mozilla/5.0"})
@@ -97,12 +84,9 @@ async def resolve(query: str) -> tuple[str, str]:
 
     try:
         target = f"ytsearch5:{search_term}" if search_term else q
-        # Прямые не-YouTube ссылки (например SoundCloud) прокси не нужен.
-        yt_opts = _YDL_OPTS_YOUTUBE if (search_term or "youtube" in q or "youtu.be" in q) else _YDL_OPTS
-        return await asyncio.to_thread(_extract, target, yt_opts)
+        return await asyncio.to_thread(_extract, target, _YDL_OPTS)
     except Exception:
-        # YouTube упёрся (анти-бот/WARP не поднялся) — пробуем тот же запрос на SoundCloud
-        # НАПРЯМУЮ, без прокси, чтобы не зависеть от состояния WARP.
+        # YouTube упёрся (анти-бот) — пробуем тот же запрос на SoundCloud.
         if search_term is None:
             raise
         return await asyncio.to_thread(_extract, f"scsearch5:{search_term}", _YDL_OPTS)
