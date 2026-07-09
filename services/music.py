@@ -18,6 +18,9 @@ _YDL_OPTS = {
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
+    # Один DRM-защищённый/удалённый результат в топ-5 не должен ронять весь поиск —
+    # пропускаем такой конкретный вариант и берём следующий подходящий.
+    "ignoreerrors": "only_download",
     # PO-токен (bgutil, локальный сервис на 4416) — обходит часть анти-бот проверок
     # без куков; вместе с куками (если есть) даёт максимум шансов достучаться до YouTube.
     "extractor_args": {"youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]}},
@@ -29,13 +32,24 @@ _http = httpx.AsyncClient(timeout=15.0, follow_redirects=True,
                           headers={"User-Agent": "Mozilla/5.0"})
 
 
+# Штрафуем каверы/минусовки/т.п., если сам запрос их не просил — иначе поиск часто
+# подсовывает "Шпана (cover На Какой-то Шансон)" вместо оригинала.
+_VARIANT_MARKERS = ("cover", "кавер", "минус", "instrumental", "karaoke", "speed up",
+                    "nightcore", "8d audio", "reverb", "remix", "ремикс", "slowed")
+
+
 def _best_match(entries: list[dict], query: str) -> dict:
     if len(entries) == 1:
         return entries[0]
     q = query.lower()
+    wants_variant = any(m in q for m in _VARIANT_MARKERS)
 
     def score(e):
-        return difflib.SequenceMatcher(None, q, (e.get("title") or "").lower()).ratio()
+        title = (e.get("title") or "").lower()
+        s = difflib.SequenceMatcher(None, q, title).ratio()
+        if not wants_variant and any(m in title for m in _VARIANT_MARKERS):
+            s -= 0.3
+        return s
 
     return max(entries, key=score)
 

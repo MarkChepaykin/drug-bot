@@ -230,8 +230,11 @@ class Jester(commands.Cog):
         try:
             url, title = await music.resolve(query)
             await ears.music(ctx.guild.id, url, title)
-        except Exception as e:
-            await ctx.followup.send(f"Не вышло с музыкой: `{type(e).__name__}: {e}`")
+        except Exception:
+            # буквальный поиск не сработал — пробуем подобрать по смыслу запроса
+            ok = await self._play_surprise(session, hint=query)
+            if not ok:
+                await ctx.followup.send("Не вышло с музыкой.")
             return
         session.played_titles.append(title)
         await ctx.followup.send(f"🎵 **{title}**")
@@ -515,7 +518,10 @@ class Jester(commands.Cog):
     async def _queue_fill(self, session: JesterSession, count: int):
         """Набивает очередь несколькими треками разом — не спрашивать песню на каждый заход."""
         ok = 0
-        for _ in range(count):
+        attempts = 0
+        max_attempts = count * 3  # часть подсказок не резолвится — с запасом попыток
+        while ok < count and attempts < max_attempts:
+            attempts += 1
             try:
                 suggestion = await llm.suggest_track(session.notes, list(session.played_titles))
                 url, title = await music.resolve(suggestion)
