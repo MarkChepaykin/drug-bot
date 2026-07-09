@@ -38,6 +38,13 @@ RADIO_RE = re.compile(
     r"|\b(?:волну|радио|плейлист)\b.{0,15}\b(?:включи|поставь|запусти|давай|врубай|вруби)\b",
     re.IGNORECASE,
 )
+# "накидай треков", "закинь 5 песен в очередь" — набить очередь пачкой сразу,
+# чтобы не просить трек за треком.
+QUEUE_FILL_RE = re.compile(
+    r"\b(?:накидай|закинь|добавь)\b.{0,20}\b(?:треков|трек|песен|песни)\b", re.IGNORECASE
+)
+QUEUE_FILL_DEFAULT = 5
+QUEUE_FILL_MAX = 8
 PLAY_RE = re.compile(
     r"\b(?:включи|поставь|запусти|заведи|врубай|вруби)\b\s*(?:мне\s+)?"
     r"(?:музык[ауи]|песн[юяи]|трек)?\s*(.*)",
@@ -357,10 +364,11 @@ class Jester(commands.Cog):
         )
         await self._on_line(session, message.author.id, message.author.display_name, content, direct)
 
-    async def _play_surprise(self, session: JesterSession) -> bool:
-        """Сам подбирает трек по настроению/заметкам о компании — для радио и «включи что-нибудь»."""
+    async def _play_surprise(self, session: JesterSession, hint: str = "") -> bool:
+        """Сам подбирает трек по настроению/заметкам о компании — для радио, «включи что-нибудь»
+        и нечётких запросов вроде «музыку по кайфу», которые не резолвятся буквально."""
         try:
-            suggestion = await llm.suggest_track(session.notes, list(session.played_titles))
+            suggestion = await llm.suggest_track(session.notes, list(session.played_titles), hint)
             url, title = await music.resolve(suggestion)
             await ears.music(session.guild_id, url, title)
         except Exception as e:
@@ -416,6 +424,11 @@ class Jester(commands.Cog):
             if not session.music_active:
                 await self._play_surprise(session)
             return True
+        if QUEUE_FILL_RE.search(low):
+            nums = re.findall(r"\d+", text)
+            count = min(int(nums[0]), QUEUE_FILL_MAX) if nums else QUEUE_FILL_DEFAULT
+            self.bot.loop.create_task(self._queue_fill(session, count))
+            return True
         m = PLAY_RE.search(text)
         if not m:
             return False
@@ -426,13 +439,33 @@ class Jester(commands.Cog):
         try:
             url, title = await music.resolve(query)
             await ears.music(session.guild_id, url, title)
-        except Exception as e:
-            await self._report_error(session, "Не вышло с музыкой", e)
+        except Exception:
+            # запрос не похож на конкретное название ("по кайфу", "что-то бодрое") —
+            # буквальный поиск не сработал, подбираем трек по смыслу этой фразы
+            await self._play_surprise(session, hint=query)
             return True
         session.played_titles.append(title)
         await session.text_channel.send(f"🎵 **{title}**")
         await self._speak(session, f"Включаю {title}")
         return True
+
+    async def _queue_fill(self, session: JesterSession, count: int):
+        """Набивает очередь несколькими треками разом — не спрашивать песню на каждый заход."""
+        ok = 0
+        for _ in range(count):
+            try:
+                suggestion = await llm.suggest_track(session.notes, list(session.played_titles))
+                url, title = await music.resolve(suggestion)
+            except Exception:
+                continue
+            try:
+                await ears.music(session.guild_id, url, title)
+            except Exception as e:
+                await self._report_error(session, "Очередь не собралась", e)
+                return
+            session.played_titles.append(title)
+            ok += 1
+        await session.text_channel.send(f"🎵 Добавил {ok} треков в очередь" if ok else "⚠️ Не нашёл, что добавить")
 
     async def handle_music_state(self, data: dict):
         session = self.sessions.get(int(data["guild_id"]))

@@ -127,7 +127,10 @@ async def summarize(notes: str, lines: list[str]) -> str:
     return await chat([{"role": "user", "content": content}], system=SUMMARIZE_SYSTEM)
 
 
-async def suggest_track(notes: str, recent_titles: list[str]) -> str:
+async def suggest_track(notes: str, recent_titles: list[str], hint: str = "") -> str:
     recent = ", ".join(recent_titles) if recent_titles else "ничего ещё"
-    content = f"Настроение/заметки о компании: {notes or 'пока нет'}. Уже играло: {recent}. Предложи следующий трек."
+    content = f"Настроение/заметки о компании: {notes or 'пока нет'}. Уже играло: {recent}."
+    if hint:
+        content += f" Пожелание по треку от собеседника: «{hint}» — учти его при выборе."
+    content += " Предложи следующий трек."
     return await chat([{"role": "user", "content": content}], system=TRACK_SUGGEST_SYSTEM, max_tokens=40)
