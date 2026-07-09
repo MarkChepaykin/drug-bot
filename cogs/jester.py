@@ -27,12 +27,18 @@ STT_JUNK = ("субтитр", "продолжение следует", "спас
 
 # Голосовые команды музыки: "Друг, включи <трек>", "пропусти", "выключи музыку" и т.д.
 # Порядок проверки важен — специфичные паттерны идут раньше общего PLAY_RE.
+SLEEP_TIMER_RE = re.compile(
+    r"\b(?:выключи|останови)\b.*\bмузык\w*.*?через\s+(\d+)\s*(минут\w*|час\w*)", re.IGNORECASE
+)
 PAUSE_RE = re.compile(r"\bпауза\b|останови\s+трек|стоп\s+трек", re.IGNORECASE)
 RESUME_RE = re.compile(r"\b(?:продолжи|возобнови|плей)\b", re.IGNORECASE)
 REPEAT_OFF_RE = re.compile(r"\b(?:выключи|сними|убери)\b.*\bповтор", re.IGNORECASE)
 REPEAT_ON_RE = re.compile(r"\b(?:повтори|зацикли|повторяй)\b|на\s+повторе", re.IGNORECASE)
 SKIP_RE = re.compile(r"\b(?:скип|пропусти|следующ\w*)\b", re.IGNORECASE)
 STOP_RE = re.compile(r"\b(?:выключи|останови|хватит)\b.*\bмузык", re.IGNORECASE)
+VOLUME_UP_RE = re.compile(r"\b(?:погромче|громче|прибавь\s+звук|увеличь\s+звук)\b", re.IGNORECASE)
+VOLUME_DOWN_RE = re.compile(r"\b(?:потише|тише|убавь\s+звук|уменьши\s+звук)\b", re.IGNORECASE)
+NOW_PLAYING_RE = re.compile(r"\bчто\s+(?:за\s+трек|играет|это\s+за\s+песня|это\s+за\s+трек)\b", re.IGNORECASE)
 RADIO_RE = re.compile(
     r"\b(?:включи|поставь|запусти|давай|врубай|вруби)\b.{0,15}\b(?:волну|радио|плейлист)\b"
     r"|\b(?:волну|радио|плейлист)\b.{0,15}\b(?:включи|поставь|запусти|давай|врубай|вруби)\b",
@@ -79,6 +85,7 @@ class JesterSession:
         self.radio_mode = False
         self.repeat_on = False
         self.played_titles: deque[str] = deque(maxlen=15)
+        self.sleep_timer_task: asyncio.Task | None = None
 
 
 class VoiceSelect(discord.ui.Select):
@@ -163,14 +170,28 @@ class Jester(commands.Cog):
         session = self.sessions.get(member.guild.id)
         if not session or not session.active:
             return
-        channel_ids = {getattr(before.channel, "id", None), getattr(after.channel, "id", None)}
-        if session.voice_channel_id not in channel_ids:
+        before_id = getattr(before.channel, "id", None)
+        after_id = getattr(after.channel, "id", None)
+        if session.voice_channel_id not in (before_id, after_id):
+            return
+        if after_id == session.voice_channel_id and before_id != session.voice_channel_id:
+            # человек только что зашёл — коротко отреагировать
+            self.bot.loop.create_task(self._welcome(session, member.display_name))
             return
         channel = self.bot.get_channel(session.voice_channel_id)
         if not channel or any(not m.bot for m in channel.members):
             return
         # все люди вышли — не сидим в пустом канале, отвечая на шум/эхо всю ночь
         await self._leave_session(member.guild.id, session, "канал опустел")
+
+    async def _welcome(self, session: JesterSession, name: str):
+        try:
+            reply = await llm.welcome(name, session.notes)
+        except Exception as e:
+            await self._report_error(session, "Мозг не ответил", e)
+            return
+        session.history.append({"role": "assistant", "content": reply})
+        await self._speak(session, reply)
 
     async def _greet(self, session: JesterSession, names: list[str]):
         try:
@@ -378,8 +399,50 @@ class Jester(commands.Cog):
         await session.text_channel.send(f"🎵 **{title}**")
         return True
 
+    async def _sleep_timer(self, session: JesterSession, seconds: float):
+        try:
+            await asyncio.sleep(seconds)
+            session.radio_mode = False
+            try:
+                await ears.stop_music(session.guild_id)
+            except Exception:
+                pass
+            await session.text_channel.send("🌙 Время вышло — выключаю музыку")
+        except asyncio.CancelledError:
+            pass
+
     async def _maybe_music_command(self, session: JesterSession, text: str) -> bool:
         low = text.lower()
+        m = SLEEP_TIMER_RE.search(low)
+        if m:
+            amount, unit = int(m.group(1)), m.group(2)
+            seconds = amount * (3600 if unit.startswith("час") else 60)
+            if session.sleep_timer_task:
+                session.sleep_timer_task.cancel()
+            session.sleep_timer_task = self.bot.loop.create_task(self._sleep_timer(session, seconds))
+            await session.text_channel.send(f"⏲️ Выключу музыку через {amount} {unit}")
+            return True
+        if VOLUME_UP_RE.search(low):
+            try:
+                await ears.set_volume(session.guild_id, 0.2)
+            except Exception:
+                pass
+            return True
+        if VOLUME_DOWN_RE.search(low):
+            try:
+                await ears.set_volume(session.guild_id, -0.2)
+            except Exception:
+                pass
+            return True
+        if NOW_PLAYING_RE.search(low):
+            try:
+                data = await ears.queue(session.guild_id)
+            except Exception as e:
+                await self._report_error(session, "Не узнал, что играет", e)
+                return True
+            current = data.get("current")
+            await self._speak(session, f"Сейчас играет {current}" if current else "Сейчас ничего не играет")
+            return True
         if PAUSE_RE.search(low):
             try:
                 await ears.pause_music(session.guild_id)

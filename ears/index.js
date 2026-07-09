@@ -49,6 +49,7 @@ function getState(guildId) {
       lastTrack: null,
       subscription: null,
       subscribedTo: null,
+      volume: 1.0,
     };
     states.set(guildId, st);
   }
@@ -249,7 +250,9 @@ function nextSpeech(guildId) {
   const file = st.speechQueue.shift();
   if (file) {
     st.currentSpeech = file;
-    st.speechPlayer.play(createAudioResource(file));
+    const resource = createAudioResource(file, { inlineVolume: true });
+    resource.volume.setVolume(st.volume);
+    st.speechPlayer.play(resource);
     return;
   }
   // речь кончилась — возвращаем музыку
@@ -273,7 +276,7 @@ function play(guildId, file) {
 
 // --- музыка ---
 
-function trackResource(url) {
+function trackResource(url, volume) {
   // Свой ffmpeg с reconnect-флагами: потоковые URL (HLS-плейлисты, CDN-ссылки) от
   // yt-dlp/SoundCloud иногда обрываются или требуют переподключения на лету.
   const transcoder = new prism.FFmpeg({
@@ -290,7 +293,9 @@ function trackResource(url) {
     ],
   });
   transcoder.on("error", (e) => log("ffmpeg track error:", e.message));
-  return createAudioResource(transcoder, { inputType: StreamType.Raw });
+  const resource = createAudioResource(transcoder, { inputType: StreamType.Raw, inlineVolume: true });
+  resource.volume.setVolume(volume);
+  return resource;
 }
 
 function nextTrack(guildId) {
@@ -307,7 +312,7 @@ function nextTrack(guildId) {
   }
   st.musicActive = true;
   st.lastTrack = track;
-  st.musicPlayer.play(trackResource(track.url));
+  st.musicPlayer.play(trackResource(track.url, st.volume));
   log("music:", track.title);
   if (!st.currentSpeech && st.speechQueue.length === 0) subscribeTo(guildId, "music");
   postMusicState(guildId, true);
@@ -352,6 +357,17 @@ function setRepeat(guildId, on) {
   getState(guildId).musicRepeat = !!on;
 }
 
+function adjustVolume(guildId, delta) {
+  const st = getState(guildId);
+  st.volume = Math.min(2.0, Math.max(0.1, st.volume + delta));
+  // применяем сразу к тому, что уже играет — не ждём следующего трека/реплики
+  const musicRes = st.musicPlayer && st.musicPlayer.state.resource;
+  if (musicRes && musicRes.volume) musicRes.volume.setVolume(st.volume);
+  const speechRes = st.speechPlayer && st.speechPlayer.state.resource;
+  if (speechRes && speechRes.volume) speechRes.volume.setVolume(st.volume);
+  return st.volume;
+}
+
 function queueList(guildId) {
   const st = getState(guildId);
   const current = st.lastTrack ? st.lastTrack.title : null;
@@ -386,6 +402,7 @@ const server = http.createServer((req, res) => {
       else if (req.url === "/pausemusic") pauseMusic(gid);
       else if (req.url === "/resumemusic") resumeMusic(gid);
       else if (req.url === "/repeat") setRepeat(gid, data.on);
+      else if (req.url === "/volume") adjustVolume(gid, data.delta);
       else {
         res.statusCode = 404;
         res.end("nope");

@@ -55,3 +55,8 @@ async def queue(guild_id: int) -> dict:
     r = await _client.get(f"{EARS_URL}/queue", params={"guild_id": str(guild_id)})
     r.raise_for_status()
     return r.json()
+
+
+async def set_volume(guild_id: int, delta: float):
+    r = await _client.post(f"{EARS_URL}/volume", json={"guild_id": str(guild_id), "delta": delta})
+    r.raise_for_status()
