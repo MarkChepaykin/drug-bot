@@ -20,9 +20,13 @@ from services import ears, llm, music, soundboard, stt, tts, voiceclips
 # Сколько секунд тишины ждать перед ответом в диалоге 1:1 — даёт человеку закончить
 # мысль, а не отвечать на каждый обрывок фразы (речь режется на куски по паузам).
 # Продлевается в реальном времени сигналом /speaking, так что можно держать коротким.
-TURN_GAP = 0.8
+TURN_GAP = 1.3
 # Сколько секунд тишины ждать перед репликой, когда говорят несколько человек.
-GROUP_GAP = 5
+GROUP_GAP = 8
+# В группе (несколько активных) бот вклинивается РЕДКО: не на каждую паузу и не чаще
+# раза в N секунд — чтобы при куче народу не тараторил, а вставлял реплику изредка.
+GROUP_INTERJECT_CHANCE = 0.3
+GROUP_INTERJECT_COOLDOWN = 35
 # Автор считается активным участником, если говорил/писал в последние N секунд.
 ACTIVE_WINDOW = 60
 # Мусорные фразы Whisper на шуме/тишине.
@@ -116,6 +120,7 @@ class JesterSession:
         self.last_author = 0
         self.last_clip_time = 0.0
         self.last_sound_time = 0.0
+        self.last_interject_time = 0.0
 
 
 class VoiceSelect(discord.ui.Select):
@@ -138,10 +143,21 @@ class VoiceSelect(discord.ui.Select):
 
 
 class Jester(commands.Cog):
+    # Гостям показываем только призыв/выход — остальное бот делает голосом, меню не захламляем.
+    PUBLIC_COMMANDS = {"join", "leave"}
+
     def __init__(self, bot):
         self.bot = bot
         self.sessions: dict[int, JesterSession] = {}
         self.default_voice_key = tts.DEFAULT_VOICE_KEY
+        # Прячем служебные команды под право «Управление сервером» (не видны обычным участникам).
+        hidden = discord.Permissions(manage_guild=True)
+        for cmd in self.__cog_commands__:
+            if getattr(cmd, "name", None) not in self.PUBLIC_COMMANDS:
+                try:
+                    cmd.default_member_permissions = hidden
+                except Exception:
+                    pass
 
     @commands.Cog.listener()
     async def on_application_command(self, ctx):
@@ -717,6 +733,12 @@ class Jester(commands.Cog):
                 session.history.append({"role": "assistant", "content": reply})
                 await self._speak(session, reply)
             else:
+                now = time.monotonic()
+                # много активных — чаще молчим: не на каждую групповую паузу и с кулдауном
+                if (now - session.last_interject_time < GROUP_INTERJECT_COOLDOWN
+                        or random.random() > GROUP_INTERJECT_CHANCE):
+                    return
+                session.last_interject_time = now
                 try:
                     await self._interject(session)
                 except Exception as e:
