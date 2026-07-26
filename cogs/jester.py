@@ -183,6 +183,7 @@ class Jester(commands.Cog):
             return None
         session = JesterSession(ctx.guild.id, ctx.channel, self.default_voice_key, channel.id)
         self.sessions[ctx.guild.id] = session
+        self.bot.loop.create_task(tts.warm())  # заранее будим GPU Modal под голос Максима
         if greet:
             names = [m.display_name for m in channel.members if not m.bot]
             self.bot.loop.create_task(self._greet(session, names))

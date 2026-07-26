@@ -1,6 +1,7 @@
 import asyncio
 
 import edge_tts
+import httpx
 
 import config
 
@@ -9,8 +10,9 @@ import config
 # rate ускоряет речь БЕЗ изменения тона (нейросеть переозвучивает, а не растягивает),
 # поэтому дефолт — родной русский голос, ускоренный, без питч-сдвига (не «растянуто»).
 VOICES = {
-    # Мем-робот в духе донатного «Максима»: локальный espeak-ng (ломаная механическая речь).
-    "Максим 🎙️": {"engine": "espeak", "speed": "165", "pitch": "35"},
+    # Настоящий Максим: edge-tts база -> RVC-модель MaximBot на Modal (GPU). Если Modal
+    # не сконфигурирован/недоступен — авто-фоллбэк на локальный espeak-робот (не немеет).
+    "Максим 🎙️": {"engine": "rvc"},
     "Обычный": {"voice": "ru-RU-DmitryNeural", "rate": "+18%"},
     "Пискля 🐿️": {"voice": "ru-RU-DmitryNeural", "rate": "+30%", "pitch": "+45Hz"},
     "Демон 😈": {"voice": "ru-RU-DmitryNeural", "rate": "+8%", "pitch": "-40Hz"},
@@ -36,8 +38,45 @@ PREVIEWS = {
 }
 
 
+# Если RVC-бэкенд недоступен — этим локальным espeak-роботом озвучиваем, чтоб не молчать.
+_ESPEAK_FALLBACK = {"engine": "espeak", "speed": "165", "pitch": "35"}
+
+
+async def _rvc_synth(text: str, path: str) -> bool:
+    """Настоящий Максим через Modal (GPU). True — записал wav в path, False — не вышло."""
+    if not config.RVC_URL:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as c:
+            r = await c.post(config.RVC_URL, json={"text": text, "token": config.RVC_TOKEN})
+        if r.status_code != 200 or len(r.content) < 500:
+            print(f"[tts] rvc bad response: {r.status_code} len={len(r.content)}", flush=True)
+            return False
+        with open(path, "wb") as f:
+            f.write(r.content)
+        return True
+    except Exception as e:
+        print(f"[tts] rvc error: {e!r}", flush=True)
+        return False
+
+
+async def warm() -> None:
+    """Разбудить GPU Modal заранее (зовём при /join), чтобы не ловить холодный старт."""
+    if not config.RVC_WARM:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            await c.get(config.RVC_WARM)
+    except Exception:
+        pass
+
+
 async def synthesize(text: str, path: str, voice_key: str | None = None) -> str:
     preset = VOICES.get(voice_key) or {"voice": config.TTS_VOICE}
+    if preset.get("engine") == "rvc":
+        if await _rvc_synth(text, path):
+            return path
+        preset = _ESPEAK_FALLBACK  # Modal недоступен — не немеем, говорим локальным роботом
     if preset.get("engine") == "espeak":
         proc = await asyncio.create_subprocess_exec(
             "espeak-ng", "-v", preset.get("lang", "ru"),

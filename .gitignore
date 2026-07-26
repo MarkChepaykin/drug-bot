@@ -10,3 +10,8 @@ winproxy.py
 .impeccable/
 ears/node_modules/
 youtube_cookies.txt
+
+# RVC модель (в git не кладём, живёт в Modal volume)
+modal_maxim/*.pth
+modal_maxim/*.index
+.modal.toml

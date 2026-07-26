@@ -9,6 +9,11 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_PROXY = os.getenv("GROQ_PROXY", "")
 DEBUG_GUILD = os.getenv("DEBUG_GUILD")
 
+# Голос «Максим» через RVC на Modal (serverless GPU). Пусто — работает espeak-фоллбэк.
+RVC_URL = os.getenv("RVC_URL", "")        # POST {text, token} -> audio/wav
+RVC_WARM = os.getenv("RVC_WARM", "")      # GET, будит GPU при /join
+RVC_TOKEN = os.getenv("RVC_TOKEN", "")
+
 LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
 STT_MODEL = os.getenv("STT_MODEL", "whisper-large-v3-turbo")
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ru")
