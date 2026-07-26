@@ -9,6 +9,8 @@ import config
 # rate ускоряет речь БЕЗ изменения тона (нейросеть переозвучивает, а не растягивает),
 # поэтому дефолт — родной русский голос, ускоренный, без питч-сдвига (не «растянуто»).
 VOICES = {
+    # Мем-робот в духе донатного «Максима»: локальный espeak-ng (ломаная механическая речь).
+    "Максим 🎙️": {"engine": "espeak", "speed": "165", "pitch": "35"},
     "Обычный": {"voice": "ru-RU-DmitryNeural", "rate": "+18%"},
     "Пискля 🐿️": {"voice": "ru-RU-DmitryNeural", "rate": "+30%", "pitch": "+45Hz"},
     "Демон 😈": {"voice": "ru-RU-DmitryNeural", "rate": "+8%", "pitch": "-40Hz"},
@@ -16,12 +18,13 @@ VOICES = {
     "Американец 🇺🇸": {"voice": "en-US-AndrewMultilingualNeural", "rate": "+12%"},
     "Немец 🍺": {"voice": "de-DE-FlorianMultilingualNeural", "rate": "+10%"},
     "Француз 🥖": {"voice": "fr-FR-RemyMultilingualNeural", "rate": "+10%"},
-    "Робот 🤖": {"engine": "espeak"},
+    "Робот 🤖": {"engine": "espeak", "speed": "140", "pitch": "50"},
 }
 
-DEFAULT_VOICE_KEY = "Обычный"
+DEFAULT_VOICE_KEY = "Максим 🎙️"
 
 PREVIEWS = {
+    "Максим 🎙️": "Это Максим. Донаты и ваши шутки читаю с одинаковым презрением.",
     "Обычный": "Так, вернул нормальный голос. Все выдохнули.",
     "Пискля 🐿️": "А вот так я звучу, когда вы опять что-то сломали.",
     "Демон 😈": "Таким голосом я буду объявлять, кто сегодня играл хуже всех.",
@@ -37,7 +40,10 @@ async def synthesize(text: str, path: str, voice_key: str | None = None) -> str:
     preset = VOICES.get(voice_key) or {"voice": config.TTS_VOICE}
     if preset.get("engine") == "espeak":
         proc = await asyncio.create_subprocess_exec(
-            "espeak-ng", "-v", "ru", "-s", "140", "-w", path, text
+            "espeak-ng", "-v", preset.get("lang", "ru"),
+            "-s", str(preset.get("speed", "160")),
+            "-p", str(preset.get("pitch", "40")),
+            "-w", path, text,
         )
         await proc.wait()
         return path
