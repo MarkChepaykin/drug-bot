@@ -6,18 +6,20 @@ import config
 
 # Пресеты голосов: базовый edge-tts голос + сдвиг тона/скорости для мемности.
 # Голос — только звучание. Персона всегда одна: Друг.
+# rate ускоряет речь БЕЗ изменения тона (нейросеть переозвучивает, а не растягивает),
+# поэтому дефолт — родной русский голос, ускоренный, без питч-сдвига (не «растянуто»).
 VOICES = {
-    "Обычный": {"voice": "ru-RU-DmitryNeural"},
-    "Пискля 🐿️": {"voice": "ru-RU-DmitryNeural", "rate": "+25%", "pitch": "+45Hz"},
-    "Демон 😈": {"voice": "ru-RU-DmitryNeural", "rate": "-10%", "pitch": "-40Hz"},
-    "Бас 🗿": {"voice": "ru-RU-DmitryNeural", "rate": "-5%", "pitch": "-22Hz"},
-    "Американец 🇺🇸": {"voice": "en-US-AndrewMultilingualNeural"},
-    "Немец 🍺": {"voice": "de-DE-FlorianMultilingualNeural"},
-    "Француз 🥖": {"voice": "fr-FR-RemyMultilingualNeural"},
+    "Обычный": {"voice": "ru-RU-DmitryNeural", "rate": "+18%"},
+    "Пискля 🐿️": {"voice": "ru-RU-DmitryNeural", "rate": "+30%", "pitch": "+45Hz"},
+    "Демон 😈": {"voice": "ru-RU-DmitryNeural", "rate": "+8%", "pitch": "-40Hz"},
+    "Бас 🗿": {"voice": "ru-RU-DmitryNeural", "rate": "+10%", "pitch": "-22Hz"},
+    "Американец 🇺🇸": {"voice": "en-US-AndrewMultilingualNeural", "rate": "+12%"},
+    "Немец 🍺": {"voice": "de-DE-FlorianMultilingualNeural", "rate": "+10%"},
+    "Француз 🥖": {"voice": "fr-FR-RemyMultilingualNeural", "rate": "+10%"},
     "Робот 🤖": {"engine": "espeak"},
 }
 
-DEFAULT_VOICE_KEY = "Американец 🇺🇸"
+DEFAULT_VOICE_KEY = "Обычный"
 
 PREVIEWS = {
     "Обычный": "Так, вернул нормальный голос. Все выдохнули.",

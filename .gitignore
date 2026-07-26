@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 *.mp3
 *.wav
+!sounds/*.mp3
 amnezia/
 winproxy.py
 .impeccable/

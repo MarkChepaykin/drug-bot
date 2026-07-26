@@ -1,7 +1,9 @@
 import asyncio
 import difflib
 import os
+import random
 import re
+import shutil
 import tempfile
 import time
 import uuid
@@ -10,7 +12,7 @@ from collections import deque
 import discord
 from discord.ext import commands
 
-from services import ears, llm, music, stt, tts
+from services import ears, llm, music, soundboard, stt, tts, voiceclips
 
 # Голосом (соединение, приём и проигрывание) управляет Node-сервис ears
 # (discord.js + DAVE E2EE). Python — мозг: STT, персона, решения когда говорить.
@@ -18,9 +20,9 @@ from services import ears, llm, music, stt, tts
 # Сколько секунд тишины ждать перед ответом в диалоге 1:1 — даёт человеку закончить
 # мысль, а не отвечать на каждый обрывок фразы (речь режется на куски по паузам).
 # Продлевается в реальном времени сигналом /speaking, так что можно держать коротким.
-TURN_GAP = 1.1
+TURN_GAP = 0.8
 # Сколько секунд тишины ждать перед репликой, когда говорят несколько человек.
-GROUP_GAP = 7
+GROUP_GAP = 5
 # Автор считается активным участником, если говорил/писал в последние N секунд.
 ACTIVE_WINDOW = 60
 # Мусорные фразы Whisper на шуме/тишине.
@@ -77,6 +79,19 @@ GENERIC_QUERY_RE = re.compile(
 # более долгая память — через session.notes, которые сжимаются отдельно).
 RECENT_TURNS = 14
 
+# Мем-звук в реплике модели: [звук:тег] в начале. Вырезаем и проигрываем вместо чтения вслух.
+SOUND_TAG_HEAD = re.compile(r"^\s*\[\s*звук\s*:\s*([a-zа-я0-9_\-]+)\s*\]\s*", re.IGNORECASE)
+SOUND_TAG_ANY = re.compile(r"\[\s*звук\s*:[^\]]*\]", re.IGNORECASE)
+# Не чаще одного авто-звука (по ключевым словам) раз в N секунд на сессию.
+SOUND_COOLDOWN = 12
+# Голосовые нарезки людей: изредка вставляем чью-то прошлую фразу его же голосом.
+CLIP_CALLBACK_CHANCE = 0.12
+CLIP_COOLDOWN = 150
+# Копим только внятные короткие фразы (48кГц стерео 16бит = 192000 байт/с).
+_BPS = 48000 * 2 * 2
+CLIP_MIN_BYTES = int(_BPS * 0.8)
+CLIP_MAX_BYTES = int(_BPS * 4.0)
+
 
 class JesterSession:
     def __init__(self, guild_id, text_channel, voice_key, voice_channel_id):
@@ -98,6 +113,9 @@ class JesterSession:
         self.repeat_on = False
         self.played_titles: deque[str] = deque(maxlen=15)
         self.sleep_timer_task: asyncio.Task | None = None
+        self.last_author = 0
+        self.last_clip_time = 0.0
+        self.last_sound_time = 0.0
 
 
 class VoiceSelect(discord.ui.Select):
@@ -351,6 +369,52 @@ class Jester(commands.Cog):
         await ctx.respond("Ага.", ephemeral=True)
         await self._interject(session)
 
+    @discord.slash_command(description="Проиграть мем-звук (без тега — случайный)")
+    async def sb(self, ctx: discord.ApplicationContext, tag: str = ""):
+        session = self.sessions.get(ctx.guild.id)
+        if not session:
+            await ctx.respond("Сначала позови меня в войс: /join", ephemeral=True)
+            return
+        tag = tag.strip().lower()
+        if tag and not soundboard.exists(tag):
+            await ctx.respond("Нет такого звука. Список: /sounds", ephemeral=True)
+            return
+        tag = tag or soundboard.random_tag()
+        if not tag:
+            await ctx.respond("Саундборд пуст.", ephemeral=True)
+            return
+        await self._play_sound(session, tag)
+        await ctx.respond(f"🔊 {tag}", ephemeral=True)
+
+    @discord.slash_command(description="Показать доступные мем-звуки")
+    async def sounds(self, ctx: discord.ApplicationContext):
+        tags = soundboard.all_tags()
+        if not tags:
+            await ctx.respond("Саундборд пуст.", ephemeral=True)
+            return
+        await ctx.respond("Звуки (`/sb <тег>`):\n" + ", ".join(tags), ephemeral=True)
+
+    @discord.slash_command(description="Вставить прямо сейчас чью-то записанную фразу его голосом")
+    async def clip(self, ctx: discord.ApplicationContext):
+        session = self.sessions.get(ctx.guild.id)
+        if not session:
+            await ctx.respond("Сначала позови меня в войс: /join", ephemeral=True)
+            return
+        if not voiceclips.has_clips(ctx.guild.id):
+            await ctx.respond("Пока нечего вставлять — я ещё не наслушался голосов.", ephemeral=True)
+            return
+        await ctx.respond("🎙️", ephemeral=True)
+        await self._clip_callback(session)
+
+    @discord.slash_command(description="Сколько голосовых нарезок записано по каждому")
+    async def clips(self, ctx: discord.ApplicationContext):
+        data = voiceclips.counts(ctx.guild.id)
+        if not data:
+            await ctx.respond("Пока пусто.", ephemeral=True)
+            return
+        lines = "\n".join(f"— {name}: {n}" for name, n in data.items())
+        await ctx.respond("Записано фраз:\n" + lines, ephemeral=True)
+
     # --- входящие реплики: голос (от ears) и текст (из канала) ---
 
     def handle_speaking(self, data: dict):
@@ -384,6 +448,9 @@ class Jester(commands.Cog):
             member = session.text_channel.guild.get_member(user_id)
             name = member.display_name if member else "Кто-то"
             print(f"[jester] услышал {name}: {text}", flush=True)
+            # изолированная нарезка голоса — короткая внятная фраза, чтобы позже вставить
+            if CLIP_MIN_BYTES <= len(wav) <= CLIP_MAX_BYTES and 6 <= len(text) <= 120:
+                voiceclips.add(session.guild_id, user_id, name, path, text)
             direct = re.search(r"\bдруг", text.lower()) is not None
             await self._on_line(session, user_id, name, text, direct)
         finally:
@@ -591,6 +658,7 @@ class Jester(commands.Cog):
     async def _on_line(self, session: JesterSession, author_id: int, name: str, text: str, direct: bool):
         now = time.monotonic()
         session.authors[author_id] = now
+        session.last_author = author_id
         session.last_msg_time = now
         if await self._maybe_music_command(session, text):
             return
@@ -598,6 +666,12 @@ class Jester(commands.Cog):
             # во время трека реагируем только на прямое обращение по имени — иначе
             # велик риск отвечать на подхваченные микрофоном звуки самой песни
             return
+        # мгновенный мем-звук по точной ключевой фразе (редко, с кулдауном)
+        if now - session.last_sound_time > SOUND_COOLDOWN:
+            tag = soundboard.keyword_match(text)
+            if tag:
+                session.last_sound_time = now
+                self.bot.loop.create_task(self._play_sound(session, tag))
         session.history.append({"role": "user", "content": f"{name}: {text}"})
         session.turn_direct = session.turn_direct or direct
         session.lines_since_sum += 1
@@ -624,6 +698,14 @@ class Jester(commands.Cog):
             direct = session.turn_direct
             session.turn_direct = False
             active = sum(1 for t in session.authors.values() if time.monotonic() - t < ACTIVE_WINDOW)
+            # изредка вместо своей реплики — неожиданно вставить чью-то прошлую фразу
+            # его же голосом (не когда обращаются напрямую и не поверх музыки)
+            if (not direct and not session.music_active
+                    and voiceclips.has_clips(session.guild_id)
+                    and time.monotonic() - session.last_clip_time > CLIP_COOLDOWN
+                    and random.random() < CLIP_CALLBACK_CHANCE):
+                if await self._clip_callback(session):
+                    return
             if direct or active <= 1:
                 try:
                     reply = await llm.voice_chat(list(session.history)[-RECENT_TURNS:], session.notes)
@@ -668,12 +750,56 @@ class Jester(commands.Cog):
         )
 
     async def _speak(self, session: JesterSession, text: str):
+        # Модель могла поставить в начало мем-звук [звук:тег] — вырезаем и проигрываем его,
+        # а любые случайные теги внутри убираем, чтобы не читать вслух скобки.
+        tag = None
+        m = SOUND_TAG_HEAD.match(text)
+        if m:
+            tag = m.group(1).lower()
+            text = text[m.end():]
+        text = SOUND_TAG_ANY.sub("", text).strip()
         try:
-            path = os.path.join(tempfile.gettempdir(), f"speak_{uuid.uuid4().hex}.mp3")
-            await tts.synthesize(text, path, session.voice_key)
-            await ears.play(session.guild_id, path)
+            if tag and soundboard.exists(tag):
+                await self._play_sound(session, tag)
+            if text:
+                path = os.path.join(tempfile.gettempdir(), f"speak_{uuid.uuid4().hex}.mp3")
+                await tts.synthesize(text, path, session.voice_key)
+                await ears.play(session.guild_id, path)
         except Exception as e:
             await self._report_error(session, "Озвучка не сработала", e)
+
+    async def _play_asset(self, session: JesterSession, src_path: str):
+        """Проиграть готовый файл (звук/нарезку), не трогая оригинал — ears удаляет то, что играет,
+        поэтому отдаём ему одноразовую копию."""
+        ext = os.path.splitext(src_path)[1] or ".mp3"
+        tmp = os.path.join(tempfile.gettempdir(), f"asset_{uuid.uuid4().hex}{ext}")
+        shutil.copyfile(src_path, tmp)
+        await ears.play(session.guild_id, tmp)
+
+    async def _play_sound(self, session: JesterSession, tag: str) -> bool:
+        p = soundboard.path(tag)
+        if not p:
+            return False
+        try:
+            session.last_sound_time = time.monotonic()
+            await self._play_asset(session, p)
+            return True
+        except Exception as e:
+            await self._report_error(session, "Звук не проиграл", e)
+            return False
+
+    async def _clip_callback(self, session: JesterSession) -> bool:
+        clip = voiceclips.random_clip(session.guild_id, exclude_user=session.last_author)
+        if not clip:
+            return False
+        session.last_clip_time = time.monotonic()
+        print(f"[jester] вставляю нарезку {clip.get('name')}: {clip.get('text')}", flush=True)
+        try:
+            await self._play_asset(session, clip["path"])
+            return True
+        except Exception as e:
+            await self._report_error(session, "Нарезка не проиграла", e)
+            return False
 
 
 def setup(bot):
