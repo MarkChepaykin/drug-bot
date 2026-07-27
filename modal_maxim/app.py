@@ -16,6 +16,8 @@ import modal
 MODEL_PTH = "/models/MaximBot_e240_s3120.pth"
 MODEL_INDEX = "/models/added_IVF440_Flat_nprobe_1_MaximBot_v2.index"
 BASE_VOICE = "ru-RU-DmitryNeural"
+BASE_RATE = "-10%"   # темп чуть медленнее (edge-tts база; RVC сохраняет тайминг)
+F0_UP_KEY = -1       # питч чуть ниже (полутон вниз)
 
 # omegaconf==2.0.6 (транзитив rvc-python, стек fairseq) имеет «невалидные» метаданные
 # (PyYAML (>=5.1.*)), которые принимает только pip<24.1 — иначе ResolutionImpossible.
@@ -62,10 +64,10 @@ def web():
         except Exception:
             pass
     try:
-        rvc.set_params(f0method="rmvpe", f0up_key=0, index_rate=0.6,
+        rvc.set_params(f0method="rmvpe", f0up_key=F0_UP_KEY, index_rate=0.6,
                        filter_radius=3, protect=0.33, rms_mix_rate=0.25)
     except TypeError:
-        rvc.set_params({"f0method": "rmvpe", "f0up_key": 0, "index_rate": 0.6,
+        rvc.set_params({"f0method": "rmvpe", "f0up_key": F0_UP_KEY, "index_rate": 0.6,
                         "filter_radius": 3, "protect": 0.33, "rms_mix_rate": 0.25})
     print("[maxim] модель загружена", flush=True)
 
@@ -74,7 +76,7 @@ def web():
         work = tempfile.mkdtemp()
         base, base_wav, out = (os.path.join(work, n) for n in ("b.mp3", "b.wav", "o.wav"))
         try:
-            asyncio.run(edge_tts.Communicate(text, BASE_VOICE).save(base))
+            asyncio.run(edge_tts.Communicate(text, BASE_VOICE, rate=BASE_RATE).save(base))
             subprocess.run(["ffmpeg", "-y", "-i", base, "-ar", "40000", "-ac", "1", base_wav],
                            check=True, capture_output=True)
             rvc.infer_file(base_wav, out)
