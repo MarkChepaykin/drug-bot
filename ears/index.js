@@ -49,7 +49,10 @@ function getState(guildId) {
       lastTrack: null,
       subscription: null,
       subscribedTo: null,
-      volume: 1.0,
+      // Разная база: трек мастерится громко (~-10 dBFS), синтез-голос тише (~-22 dBFS RMS).
+      // Голос чуть поднимаем (пик позволяет, без клиппинга), музыку опускаем — чтоб на слух ровно.
+      speechVolume: 1.3,
+      musicVolume: 0.35,
     };
     states.set(guildId, st);
   }
@@ -251,7 +254,7 @@ function nextSpeech(guildId) {
   if (file) {
     st.currentSpeech = file;
     const resource = createAudioResource(file, { inlineVolume: true });
-    resource.volume.setVolume(st.volume);
+    resource.volume.setVolume(st.speechVolume);
     st.speechPlayer.play(resource);
     return;
   }
@@ -312,7 +315,7 @@ function nextTrack(guildId) {
   }
   st.musicActive = true;
   st.lastTrack = track;
-  st.musicPlayer.play(trackResource(track.url, st.volume));
+  st.musicPlayer.play(trackResource(track.url, st.musicVolume));
   log("music:", track.title);
   if (!st.currentSpeech && st.speechQueue.length === 0) subscribeTo(guildId, "music");
   postMusicState(guildId, true);
@@ -358,14 +361,12 @@ function setRepeat(guildId, on) {
 }
 
 function adjustVolume(guildId, delta) {
+  // «громче/тише» регулируют музыку (голос держим на своём уровне для баланса)
   const st = getState(guildId);
-  st.volume = Math.min(2.0, Math.max(0.1, st.volume + delta));
-  // применяем сразу к тому, что уже играет — не ждём следующего трека/реплики
+  st.musicVolume = Math.min(2.0, Math.max(0.05, st.musicVolume + delta));
   const musicRes = st.musicPlayer && st.musicPlayer.state.resource;
-  if (musicRes && musicRes.volume) musicRes.volume.setVolume(st.volume);
-  const speechRes = st.speechPlayer && st.speechPlayer.state.resource;
-  if (speechRes && speechRes.volume) speechRes.volume.setVolume(st.volume);
-  return st.volume;
+  if (musicRes && musicRes.volume) musicRes.volume.setVolume(st.musicVolume);
+  return st.musicVolume;
 }
 
 function queueList(guildId) {
