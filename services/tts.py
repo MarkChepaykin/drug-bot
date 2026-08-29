@@ -11,7 +11,7 @@ import config
 # поэтому дефолт — родной русский голос, ускоренный, без питч-сдвига (не «растянуто»).
 VOICES = {
     # Настоящий Максим: edge-tts база -> RVC-модель MaximBot на Modal (GPU). Если Modal
-    # не сконфигурирован/недоступен — авто-фоллбэк на локальный espeak-робот (не немеет).
+    # не сконфигурирован/недоступен — авто-фоллбэк на «Обычный».
     "Максим 🎙️": {"engine": "rvc"},
     "Обычный": {"voice": "ru-RU-DmitryNeural", "rate": "+18%"},
     "Пискля 🐿️": {"voice": "ru-RU-DmitryNeural", "rate": "+30%", "pitch": "+45Hz"},
@@ -23,7 +23,9 @@ VOICES = {
     "Робот 🤖": {"engine": "espeak", "speed": "140", "pitch": "50"},
 }
 
-DEFAULT_VOICE_KEY = "Максим 🎙️"
+# Максим — только если RVC реально настроен. Иначе он молча падал в espeak-робота,
+# и компания при каждом старте слышала робота вместо нормального голоса.
+DEFAULT_VOICE_KEY = "Максим 🎙️" if config.RVC_URL else "Обычный"
 
 PREVIEWS = {
     "Максим 🎙️": "Это Максим. Донаты и ваши шутки читаю с одинаковым презрением.",
@@ -36,10 +38,6 @@ PREVIEWS = {
     "Француз 🥖": "Уи, теперь я звучу дорого. В отличие от ваших шуток.",
     "Робот 🤖": "Теперь я звучу как робот из двухтысячных. Сопротивление бесполезно.",
 }
-
-
-# Если RVC-бэкенд недоступен — этим локальным espeak-роботом озвучиваем, чтоб не молчать.
-_ESPEAK_FALLBACK = {"engine": "espeak", "speed": "165", "pitch": "35"}
 
 
 async def _rvc_synth(text: str, path: str) -> bool:
@@ -76,7 +74,7 @@ async def synthesize(text: str, path: str, voice_key: str | None = None) -> str:
     if preset.get("engine") == "rvc":
         if await _rvc_synth(text, path):
             return path
-        preset = _ESPEAK_FALLBACK  # Modal недоступен — не немеем, говорим локальным роботом
+        preset = VOICES["Обычный"]  # Modal недоступен — говорим обычным голосом, а не роботом
     if preset.get("engine") == "espeak":
         proc = await asyncio.create_subprocess_exec(
             "espeak-ng", "-v", preset.get("lang", "ru"),
