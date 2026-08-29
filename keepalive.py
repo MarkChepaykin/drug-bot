@@ -5,7 +5,7 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "v37"
+VERSION = "v38"
 status = "starting"
 
 # Хуки для событий войса (ставит bot.py). Вызываются из потока HTTP-сервера.
