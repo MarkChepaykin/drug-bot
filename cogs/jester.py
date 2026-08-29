@@ -22,13 +22,15 @@ from services import ears, llm, music, soundboard, stt, tts, voiceclips
 # Продлевается в реальном времени сигналом /speaking, так что можно держать коротким.
 TURN_GAP = 1.3
 # Сколько секунд тишины ждать перед репликой, когда говорят несколько человек.
-GROUP_GAP = 8
+GROUP_GAP = 5
 # В группе (несколько активных) бот вклинивается РЕДКО: не на каждую паузу и не чаще
 # раза в N секунд — чтобы при куче народу не тараторил, а вставлял реплику изредка.
 GROUP_INTERJECT_CHANCE = 0.3
 GROUP_INTERJECT_COOLDOWN = 35
 # Автор считается активным участником, если говорил/писал в последние N секунд.
 ACTIVE_WINDOW = 60
+# Сколько сверх паузы бот готов ждать тишины, прежде чем ответить всё равно.
+MAX_EXTRA_WAIT = 6
 # Мусорные фразы Whisper на шуме/тишине.
 STT_JUNK = (
     "субтитр", "продолжение следует", "спасибо за просмотр", "dimatorzok",
@@ -439,9 +441,11 @@ class Jester(commands.Cog):
         session = self.sessions.get(int(data["guild_id"]))
         if not session or not session.active:
             return
-        now = time.monotonic()
-        session.last_msg_time = now
-        session.authors[int(data["user_id"])] = now
+        # ВАЖНО: пинг только продлевает ожидание. В session.authors человек попадает
+        # ТОЛЬКО за реально распознанную реплику (_on_line) — иначе при открытых микрофонах
+        # любой кашель/шорох делал его «активным», active всегда было >= 2, и бот навсегда
+        # уходил в групповой режим (пауза 8с + шанс 30% + кулдаун 35с) = молчал всю сессию.
+        session.last_msg_time = time.monotonic()
 
     async def handle_utterance(self, data: dict):
         session = self.sessions.get(int(data["guild_id"]))
@@ -689,6 +693,7 @@ class Jester(commands.Cog):
         if session.music_active and not direct:
             # во время трека реагируем только на прямое обращение по имени — иначе
             # велик риск отвечать на подхваченные микрофоном звуки самой песни
+            print("[jester] промолчал: играет музыка, а обращения по имени не было", flush=True)
             return
         # мгновенный мем-звук по точной ключевой фразе (редко, с кулдауном)
         if now - session.last_sound_time > SOUND_COOLDOWN:
@@ -709,12 +714,15 @@ class Jester(commands.Cog):
         session.pending = self.bot.loop.create_task(self._wait_turn(session))
 
     async def _wait_turn(self, session: JesterSession):
+        started = time.monotonic()
         try:
             while True:
                 active = sum(1 for t in session.authors.values() if time.monotonic() - t < ACTIVE_WINDOW)
                 gap = TURN_GAP if (session.turn_direct or active <= 1) else GROUP_GAP
                 remaining = gap - (time.monotonic() - session.last_msg_time)
-                if remaining <= 0:
+                # Потолок: открытый микрофон и эхо музыки шлют «говорит» без пауз, и без него
+                # ожидание не кончалось бы никогда — бот молчал бы всю сессию.
+                if remaining <= 0 or time.monotonic() - started > gap + MAX_EXTRA_WAIT:
                     break
                 await asyncio.sleep(min(remaining, 1))
             if not session.active:
@@ -751,6 +759,7 @@ class Jester(commands.Cog):
                 # много активных — чаще молчим: не на каждую групповую паузу и с кулдауном
                 if (now - session.last_interject_time < GROUP_INTERJECT_COOLDOWN
                         or random.random() > GROUP_INTERJECT_CHANCE):
+                    print(f"[jester] промолчал: групповой режим, активных {active}", flush=True)
                     return
                 session.last_interject_time = now
                 try:
