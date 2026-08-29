@@ -446,6 +446,9 @@ class Jester(commands.Cog):
     async def handle_utterance(self, data: dict):
         session = self.sessions.get(int(data["guild_id"]))
         path = data.get("path", "")
+        # Момент, когда человек ДОГОВОРИЛ (ears уже отдал файл). Дальше идёт распознавание,
+        # и отсчитывать паузу-ожидание надо от этой точки, а не от возврата STT.
+        spoke_at = time.monotonic()
         try:
             if not session or not session.active:
                 return
@@ -469,7 +472,7 @@ class Jester(commands.Cog):
             if CLIP_MIN_BYTES <= len(wav) <= CLIP_MAX_BYTES and 6 <= len(text) <= 120:
                 voiceclips.add(session.guild_id, user_id, name, path, text)
             direct = re.search(r"\bдруг", text.lower()) is not None
-            await self._on_line(session, user_id, name, text, direct)
+            await self._on_line(session, user_id, name, text, direct, spoke_at)
         finally:
             try:
                 os.remove(path)
@@ -672,11 +675,15 @@ class Jester(commands.Cog):
         if not session.music_active and session.radio_mode:
             await self._play_surprise(session)
 
-    async def _on_line(self, session: JesterSession, author_id: int, name: str, text: str, direct: bool):
+    async def _on_line(self, session: JesterSession, author_id: int, name: str, text: str, direct: bool,
+                       spoke_at: float | None = None):
         now = time.monotonic()
         session.authors[author_id] = now
         session.last_author = author_id
-        session.last_msg_time = now
+        # Пауза-ожидание считается от конца речи, а не от прихода расшифровки: STT занимает
+        # секунду-полторы, и раньше она молча прибавлялась к TURN_GAP — отсюда «долго думает».
+        # max() защищает от отката назад, если человек уже заговорил снова, пока шло распознавание.
+        session.last_msg_time = max(session.last_msg_time, spoke_at or now)
         if await self._maybe_music_command(session, text):
             return
         if session.music_active and not direct:
@@ -724,6 +731,8 @@ class Jester(commands.Cog):
                 if await self._clip_callback(session):
                     return
             if direct or active <= 1:
+                # spoke_end — момент, когда человек договорил; от него и меряем задержку.
+                spoke_end, t_wait = session.last_msg_time, time.monotonic()
                 try:
                     reply = await llm.voice_chat(list(session.history)[-RECENT_TURNS:], session.notes)
                 except Exception as e:
@@ -731,8 +740,12 @@ class Jester(commands.Cog):
                     return
                 if self._too_similar(session, reply):
                     return
+                t_llm = time.monotonic()
                 session.history.append({"role": "assistant", "content": reply})
                 await self._speak(session, reply)
+                t_end = time.monotonic()
+                print(f"[jester] ответ за {t_end - spoke_end:.1f}с (пауза+stt {t_wait - spoke_end:.1f}"
+                      f" / llm {t_llm - t_wait:.1f} / озвучка {t_end - t_llm:.1f})", flush=True)
             else:
                 now = time.monotonic()
                 # много активных — чаще молчим: не на каждую групповую паузу и с кулдауном

@@ -1,7 +1,7 @@
 import asyncio
 
 import httpx
-from groq import Groq
+from groq import Groq, RateLimitError
 
 import config
 
@@ -25,7 +25,14 @@ async def transcribe(wav_bytes: bytes) -> str:
             response_format="verbose_json",
         )
 
-    result = await asyncio.to_thread(_call)
+    try:
+        result = await asyncio.to_thread(_call)
+    except RateLimitError:
+        # Free-тариф Groq даёт whisper всего 20 запросов в минуту на организацию, а живой
+        # войс на четверых легко выдаёт больше. Без retry реплика просто терялась, и человеку
+        # приходилось повторять — со стороны это выглядит как «бот тупит».
+        await asyncio.sleep(3)
+        result = await asyncio.to_thread(_call)
     segments = getattr(result, "segments", None)
     if not segments:
         return (getattr(result, "text", "") or "").strip()
