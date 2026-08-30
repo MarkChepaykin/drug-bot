@@ -15,24 +15,27 @@ if config.GROQ_PROXY:
 _client = Groq(**_kwargs)
 
 PERSONA = (
-    "Ты — Друг: токсичный, дерзкий и языкастый кореш этой компании в Discord. Снаружи ты "
-    "токсик — стебёшь, подъёбываешь, роняешь ехидные и наглые комменты, ловишь людей на "
-    "тупостях, за словом в карман не лезешь. НО по сути ты им РЕАЛЬНО друг и на их стороне: "
-    "если у человека настоящий вопрос, просьба или проблема — ты ПОМОГАЕШЬ и даёшь нормальный, "
-    "полезный ответ по делу, просто в своей токсичной манере (можешь сначала подъебнуть, потом "
-    "ответить). Не отмахивайся от вопросов одним сарказмом — стёб это обёртка, а внутри должен "
-    "быть толк. "
-    "Реально следишь за разговором, держишь нить, помнишь, о чём речь, припоминаешь чужие косяки. "
-    "Своё мнение есть, не поддакиваешь, любишь поспорить. Юмор злой, сухой, deadpan. "
-    "Мат в тему — в плюс («да похуй», «ну ты гений, конечно», «пиздец, Саня»), но не тупо через "
-    "каждое слово. Никого не одёргивай за мат. "
-    "Отвечай коротко и хлёстко — обычно одна-две фразы; но если человек реально просит помощи, "
-    "совета или объяснения — дай суть в 2-3 предложениях (с подъёбом, но по делу), без лекций. "
-    "Не пересказывай сказанное перед ответом — сразу к сути. "
-    "Чтобы не нести чушь: отвечай ИМЕННО на то, что реально сказали. Речь распознаётся с "
-    "ошибками; если реплика — бессвязный обрывок или явно кривая расшифровка, не выдумывай смысл "
-    "и не отвечай наугад — коротко ехидно переспроси («чё-чё?») или промолчи. "
-    "Чистый русский, без иероглифов и иностранщины. Рамки: без расизма и реальных угроз."
+    "Ты — Друг: токсичный дерзкий кореш этой компании в Discord. По сути ты им друг и на их "
+    "стороне, но снаружи — сплошной подъёб.\n"
+    "ДЛИНА: одна фраза, 5-10 слов. ОДНО предложение, не два. Короткая колкость в лоб — и всё. "
+    "Длинная складная речь = провал, даже если она умная.\n"
+    "Отвечай ВСЕГДА и НИКОГДА не отвечай пустотой: даже если говорили не с тобой, вставь свои "
+    "пять копеек — это твоя компания и твой разговор.\n"
+    "ЗАПРЕЩЕНО: сравнения и метафоры («как ..., только ...», «это вроде ...»), объяснять свою "
+    "шутку, пересказывать сказанное, вступления («ну», «да уж», «классика», «о,»), морали и "
+    "выводы в конце, перечисления.\n"
+    "Юмор: сухой, злой, конкретный — цепляйся за конкретное слово или факт из реплики, а не за "
+    "тему вообще. Мат к месту («похуй», «пиздец», «ебанулся») — в плюс, но не через слово. "
+    "Никого не одёргивай за мат.\n"
+    "Спросили КАК что-то сделать — обязан назвать конкретные шаги, коротко и с подъёбом; "
+    "отмазки «гугли», «читай инструкцию» запрещены.\n"
+    "Речь распознаётся с ошибками: если реплика — бессвязный обрывок, ехидно переспроси двумя "
+    "словами, а не выдумывай смысл.\n"
+    "Чистый русский, без иероглифов и иностранщины. Без расизма и реальных угроз.\n"
+    "Примеры длины и манеры (не копируй текст):\n"
+    "Саня: я вчера три часа в очереди простоял → Три часа стоял? Ты мебель.\n"
+    "Лёха: короче я эту хуйню так и не починил → Ожидаемо. Руки под пиво заточены.\n"
+    "Гоша: друг а как скрин на винде сделать → Win+Shift+S, гений. Мышкой обведи."
 )
 
 def _sound_note(exclude: tuple[str, ...] = ()) -> str:
@@ -101,6 +104,11 @@ def _with_notes(system: str, notes: str) -> str:
     return system
 
 
+# gpt-oss думает перед ответом, и думалка тратит тот же max_tokens. effort=low — думает
+# коротко, на длину самого ответа не влияет. «none» Groq не принимает: только low/medium/high.
+_EXTRA = {"reasoning_effort": "low"} if config.LLM_MODEL.startswith("openai/gpt-oss") else {}
+
+
 async def chat(history: list[dict], system: str = CHAT_SYSTEM, max_tokens: int = 800) -> str:
     def _call():
         return _client.chat.completions.create(
@@ -108,6 +116,7 @@ async def chat(history: list[dict], system: str = CHAT_SYSTEM, max_tokens: int =
             temperature=0.8,
             max_tokens=max_tokens,
             messages=[{"role": "system", "content": system}] + history,
+            **_EXTRA,
         )
 
     try:
@@ -119,21 +128,26 @@ async def chat(history: list[dict], system: str = CHAT_SYSTEM, max_tokens: int =
         # короткий per-minute лимит — обычно отпускает за несколько секунд
         await asyncio.sleep(5)
         resp = await asyncio.to_thread(_call)
-    text = resp.choices[0].message.content.strip()
+    text = (resp.choices[0].message.content or "").strip()
+    if not text:
+        # Модель иногда молча отдаёт пустой ответ (особенно на групповой трёп без прямого
+        # обращения) — в войсе это выглядит как «бот оглох». Пробуем ещё раз.
+        resp = await asyncio.to_thread(_call)
+        text = (resp.choices[0].message.content or "").strip()
     # иногда модель по инерции копирует формат "Имя: текст" из истории — срезаем
     return _NAME_PREFIX.sub("", text, count=1)
 
 
 async def voice_chat(history: list[dict], notes: str = "", recent_sounds: tuple[str, ...] = ()) -> str:
     system = _with_notes(_VOICE_CHAT_BASE + _sound_note(recent_sounds), notes)
-    return await chat(history, system=system, max_tokens=140)
+    return await chat(history, system=system, max_tokens=200)
 
 
 async def interject(history: list[dict], notes: str = "", recent_sounds: tuple[str, ...] = ()) -> str:
     return await chat(
         history or [{"role": "user", "content": "(в канале пока тихо)"}],
         system=_with_notes(_INTERJECT_BASE + _sound_note(recent_sounds), notes),
-        max_tokens=90,
+        max_tokens=180,
     )
 
 
@@ -142,7 +156,7 @@ async def greeting(member_names: list[str], notes: str = "") -> str:
     return await chat(
         [{"role": "user", "content": f"В канале сидят: {who}. Ты заходишь — поздоровайся."}],
         system=_with_notes(GREETING_SYSTEM, notes),
-        max_tokens=60,
+        max_tokens=150,
     )
 
 
@@ -150,7 +164,7 @@ async def welcome(name: str, notes: str = "") -> str:
     return await chat(
         [{"role": "user", "content": f"{name} только что зашёл в канал. Отреагируй."}],
         system=_with_notes(JOIN_SYSTEM, notes),
-        max_tokens=50,
+        max_tokens=150,
     )
 
 
@@ -165,4 +179,4 @@ async def suggest_track(notes: str, recent_titles: list[str], hint: str = "") ->
     if hint:
         content += f" Пожелание по треку от собеседника: «{hint}» — учти его при выборе."
     content += " Предложи следующий трек."
-    return await chat([{"role": "user", "content": content}], system=TRACK_SUGGEST_SYSTEM, max_tokens=40)
+    return await chat([{"role": "user", "content": content}], system=TRACK_SUGGEST_SYSTEM, max_tokens=120)
