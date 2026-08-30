@@ -14,7 +14,7 @@ RVC_URL = os.getenv("RVC_URL", "")        # POST {text, token} -> audio/wav
 RVC_WARM = os.getenv("RVC_WARM", "")      # GET, будит GPU при /join
 RVC_TOKEN = os.getenv("RVC_TOKEN", "")
 
-LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen/qwen3.6-27b")
 STT_MODEL = os.getenv("STT_MODEL", "whisper-large-v3-turbo")
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ru")
 TTS_VOICE = os.getenv("TTS_VOICE", "ru-RU-DmitryNeural")

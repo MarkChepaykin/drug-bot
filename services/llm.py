@@ -45,9 +45,8 @@ def _sound_note(exclude: tuple[str, ...] = ()) -> str:
     if not menu:
         return ""
     return (
-        " Иногда, когда это правда смешно и в тему, можешь в САМОМ НАЧАЛЕ реплики поставить "
-        "мем-звук в формате [звук:тег] — он проиграется вслух. Не в каждой реплике, а изредка, "
-        "по приколу. Можно вообще без слов — только [звук:тег]. Не нужен звук — просто не пиши тег. "
+        " Изредка — не чаще чем в одной реплике из пяти — можешь в САМОМ НАЧАЛЕ поставить "
+        "мем-звук строго в формате [звук:тег], он проиграется вслух. Чаще всего звук НЕ нужен: без него реплика бьёт сильнее. Можно и без слов — только [звук:тег]. "
         f"Доступные звуки (тег — когда уместно): {menu}."
     )
 
@@ -104,9 +103,15 @@ def _with_notes(system: str, notes: str) -> str:
     return system
 
 
-# gpt-oss думает перед ответом, и думалка тратит тот же max_tokens. effort=low — думает
-# коротко, на длину самого ответа не влияет. «none» Groq не принимает: только low/medium/high.
-_EXTRA = {"reasoning_effort": "low"} if config.LLM_MODEL.startswith("openai/gpt-oss") else {}
+# Обе линейки моделей на Groq думают перед ответом, и думалка тратит тот же max_tokens.
+# qwen понимает "none" — думать не надо совсем (и без этого сыпет <think> прямо в реплику);
+# gpt-oss "none" не принимает, у него минимум "low".
+if config.LLM_MODEL.startswith("qwen/"):
+    _EXTRA = {"reasoning_effort": "none"}
+elif config.LLM_MODEL.startswith("openai/gpt-oss"):
+    _EXTRA = {"reasoning_effort": "low"}
+else:
+    _EXTRA = {}
 
 
 async def chat(history: list[dict], system: str = CHAT_SYSTEM, max_tokens: int = 800) -> str:
@@ -140,14 +145,14 @@ async def chat(history: list[dict], system: str = CHAT_SYSTEM, max_tokens: int =
 
 async def voice_chat(history: list[dict], notes: str = "", recent_sounds: tuple[str, ...] = ()) -> str:
     system = _with_notes(_VOICE_CHAT_BASE + _sound_note(recent_sounds), notes)
-    return await chat(history, system=system, max_tokens=200)
+    return await chat(history, system=system, max_tokens=100)
 
 
 async def interject(history: list[dict], notes: str = "", recent_sounds: tuple[str, ...] = ()) -> str:
     return await chat(
         history or [{"role": "user", "content": "(в канале пока тихо)"}],
         system=_with_notes(_INTERJECT_BASE + _sound_note(recent_sounds), notes),
-        max_tokens=180,
+        max_tokens=80,
     )
 
 
@@ -156,7 +161,7 @@ async def greeting(member_names: list[str], notes: str = "") -> str:
     return await chat(
         [{"role": "user", "content": f"В канале сидят: {who}. Ты заходишь — поздоровайся."}],
         system=_with_notes(GREETING_SYSTEM, notes),
-        max_tokens=150,
+        max_tokens=80,
     )
 
 
@@ -164,7 +169,7 @@ async def welcome(name: str, notes: str = "") -> str:
     return await chat(
         [{"role": "user", "content": f"{name} только что зашёл в канал. Отреагируй."}],
         system=_with_notes(JOIN_SYSTEM, notes),
-        max_tokens=150,
+        max_tokens=80,
     )
 
 
@@ -179,4 +184,4 @@ async def suggest_track(notes: str, recent_titles: list[str], hint: str = "") ->
     if hint:
         content += f" Пожелание по треку от собеседника: «{hint}» — учти его при выборе."
     content += " Предложи следующий трек."
-    return await chat([{"role": "user", "content": content}], system=TRACK_SUGGEST_SYSTEM, max_tokens=120)
+    return await chat([{"role": "user", "content": content}], system=TRACK_SUGGEST_SYSTEM, max_tokens=40)
