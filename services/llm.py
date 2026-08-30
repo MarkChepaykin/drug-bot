@@ -35,29 +35,34 @@ PERSONA = (
     "Чистый русский, без иероглифов и иностранщины. Рамки: без расизма и реальных угроз."
 )
 
-_menu = soundboard.llm_menu()
-SOUND_NOTE = (
-    " Иногда, когда это правда смешно и в тему, можешь в САМОМ НАЧАЛЕ реплики поставить "
-    "мем-звук в формате [звук:тег] — он проиграется вслух. Не в каждой реплике, а изредка, "
-    "по приколу. Можно вообще без слов — только [звук:тег]. Не нужен звук — просто не пиши тег. "
-    f"Доступные звуки (тег — когда уместно): {_menu}."
-) if _menu else ""
+def _sound_note(exclude: tuple[str, ...] = ()) -> str:
+    """Список звуков собираем на каждый запрос: недавно игравшие в него не попадают,
+    иначе модель раз за разом жмёт одни и те же теги из начала списка."""
+    menu = soundboard.llm_menu(exclude)
+    if not menu:
+        return ""
+    return (
+        " Иногда, когда это правда смешно и в тему, можешь в САМОМ НАЧАЛЕ реплики поставить "
+        "мем-звук в формате [звук:тег] — он проиграется вслух. Не в каждой реплике, а изредка, "
+        "по приколу. Можно вообще без слов — только [звук:тег]. Не нужен звук — просто не пиши тег. "
+        f"Доступные звуки (тег — когда уместно): {menu}."
+    )
 
-VOICE_CHAT_SYSTEM = PERSONA + (
+_VOICE_CHAT_BASE = PERSONA + (
     " Ты в голосовом канале. Сообщения формата «Имя: текст» — распознанная речь участников "
     "(распознавание может ошибаться и терять слова — догадывайся по смыслу, не переспрашивай "
     "по мелочи и не придирайся к неровностям текста). "
     "Свой ответ пиши БЕЗ «Имя:» в начале — этот формат только во входящих сообщениях, "
     "ты говоришь от себя напрямую. Только устная речь: без эмодзи, разметки, списков и ремарок в скобках."
-) + SOUND_NOTE
+)
 
-INTERJECT_SYSTEM = PERSONA + (
+_INTERJECT_BASE = PERSONA + (
     " Ты в голосовом канале, следишь за разговором. Никто к тебе не обращался — ты сам решил "
     "вклиниться как участник: развей тему, добавь свою мысль или факт, вспомни, что говорили "
     "раньше, задай интересный вопрос или к месту подколи. Не пересказывай разговор и не "
     "рассказывай анекдоты. Свой ответ пиши БЕЗ «Имя:» в начале, говори от себя напрямую. "
     "Только устная речь, без эмодзи и ремарок."
-) + SOUND_NOTE
+)
 
 CHAT_SYSTEM = PERSONA + " Отвечай коротко и по делу, на русском."
 
@@ -119,15 +124,16 @@ async def chat(history: list[dict], system: str = CHAT_SYSTEM, max_tokens: int =
     return _NAME_PREFIX.sub("", text, count=1)
 
 
-async def voice_chat(history: list[dict], notes: str = "") -> str:
-    return await chat(history, system=_with_notes(VOICE_CHAT_SYSTEM, notes), max_tokens=110)
+async def voice_chat(history: list[dict], notes: str = "", recent_sounds: tuple[str, ...] = ()) -> str:
+    system = _with_notes(_VOICE_CHAT_BASE + _sound_note(recent_sounds), notes)
+    return await chat(history, system=system, max_tokens=140)
 
 
-async def interject(history: list[dict], notes: str = "") -> str:
+async def interject(history: list[dict], notes: str = "", recent_sounds: tuple[str, ...] = ()) -> str:
     return await chat(
         history or [{"role": "user", "content": "(в канале пока тихо)"}],
-        system=_with_notes(INTERJECT_SYSTEM, notes),
-        max_tokens=70,
+        system=_with_notes(_INTERJECT_BASE + _sound_note(recent_sounds), notes),
+        max_tokens=90,
     )
 
 

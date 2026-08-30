@@ -112,6 +112,21 @@ async function postSpeaking(guildId, userId) {
   }
 }
 
+// Мозгу нужно знать, когда говорит сам бот: у людей часто нет наушников, его голос
+// возвращается в их микрофоны, распознаётся и попадает в историю как чужая реплика —
+// отсюда «бот несёт хуйню» и лишнее ожидание перед ответом.
+async function postBotSpeaking(guildId, active) {
+  try {
+    await fetch(`http://127.0.0.1:${BRAIN_PORT}/bot_speaking`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Ears-Token": EARS_TOKEN },
+      body: JSON.stringify({ guild_id: guildId, active }),
+    });
+  } catch (e) {
+    // не критично
+  }
+}
+
 async function postMusicState(guildId, active) {
   try {
     await fetch(`http://127.0.0.1:${BRAIN_PORT}/music_state`, {
@@ -217,6 +232,7 @@ function leave(guildId) {
   st.musicActive = false;
   if (st.speechPlayer) st.speechPlayer.stop();
   if (st.musicPlayer) st.musicPlayer.stop();
+  postBotSpeaking(guildId, false);
   st.subscription = null;
   st.subscribedTo = null;
   log("left", guildId);
@@ -256,8 +272,10 @@ function nextSpeech(guildId) {
     const resource = createAudioResource(file, { inlineVolume: true });
     resource.volume.setVolume(st.speechVolume);
     st.speechPlayer.play(resource);
+    postBotSpeaking(guildId, true);
     return;
   }
+  postBotSpeaking(guildId, false);
   // речь кончилась — возвращаем музыку
   if (st.musicActive) {
     subscribeTo(guildId, "music");

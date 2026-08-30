@@ -30,7 +30,14 @@ GROUP_INTERJECT_COOLDOWN = 35
 # Автор считается активным участником, если говорил/писал в последние N секунд.
 ACTIVE_WINDOW = 60
 # Сколько сверх паузы бот готов ждать тишины, прежде чем ответить всё равно.
-MAX_EXTRA_WAIT = 6
+MAX_EXTRA_WAIT = 2.5
+# Сколько последних звуков не предлагать модели и не играть повторно.
+RECENT_SOUNDS = 6
+# Сколько секунд после своей реплики бот считает входящую речь возможным эхом
+# (у людей нет наушников — его же голос возвращается в их микрофоны).
+ECHO_WINDOW = 3.0
+# Насколько распознанное должно совпасть со сказанным ботом, чтобы счесть это эхом.
+ECHO_MATCH = 0.5
 # Мусорные фразы Whisper на шуме/тишине.
 STT_JUNK = (
     "субтитр", "продолжение следует", "спасибо за просмотр", "dimatorzok",
@@ -123,6 +130,12 @@ class JesterSession:
         self.last_clip_time = 0.0
         self.last_sound_time = 0.0
         self.last_interject_time = 0.0
+        # Последние сыгранные звуки — чтобы не жать одни и те же (модели их не показываем).
+        self.recent_sounds: deque[str] = deque(maxlen=RECENT_SOUNDS)
+        # Бот говорит сам / только что договорил, и что именно сказал — для отсечки эха.
+        self.bot_speaking = False
+        self.bot_quiet_since = 0.0
+        self.last_spoken_text = ""
 
 
 class VoiceSelect(discord.ui.Select):
@@ -398,7 +411,7 @@ class Jester(commands.Cog):
         if tag and not soundboard.exists(tag):
             await ctx.respond("Нет такого звука. Список: /sounds", ephemeral=True)
             return
-        tag = tag or soundboard.random_tag()
+        tag = tag or soundboard.random_tag(tuple(session.recent_sounds))
         if not tag:
             await ctx.respond("Саундборд пуст.", ephemeral=True)
             return
@@ -441,6 +454,10 @@ class Jester(commands.Cog):
         session = self.sessions.get(int(data["guild_id"]))
         if not session or not session.active:
             return
+        # Пока бот говорит, микрофоны слышат его самого — такие пинги не продлеваем,
+        # иначе бот сам себе бесконечно двигает паузу и отвечает с большой задержкой.
+        if session.bot_speaking:
+            return
         # ВАЖНО: пинг только продлевает ожидание. В session.authors человек попадает
         # ТОЛЬКО за реально распознанную реплику (_on_line) — иначе при открытых микрофонах
         # любой кашель/шорох делал его «активным», active всегда было >= 2, и бот навсегда
@@ -467,6 +484,9 @@ class Jester(commands.Cog):
                 return
             text = (text or "").strip()
             if len(text) < 2 or any(j in text.lower() for j in STT_JUNK):
+                return
+            if self._is_echo(session, text):
+                print(f"[jester] эхо своей реплики, пропускаю: {text[:60]}", flush=True)
                 return
             user_id = int(data["user_id"])
             member = session.text_channel.guild.get_member(user_id)
@@ -671,6 +691,16 @@ class Jester(commands.Cog):
         else:
             await session.text_channel.send("⚠️ Не нашёл, что добавить")
 
+    def handle_bot_speaking(self, data: dict):
+        """ears сообщает, когда бот говорит сам. Пока он говорит, входящий звук — почти
+        наверняка его же голос из чужих колонок, а не реплика человека."""
+        session = self.sessions.get(int(data["guild_id"]))
+        if not session or not session.active:
+            return
+        session.bot_speaking = bool(data.get("active"))
+        if not session.bot_speaking:
+            session.bot_quiet_since = time.monotonic()
+
     async def handle_music_state(self, data: dict):
         session = self.sessions.get(int(data["guild_id"]))
         if not session or not session.active:
@@ -698,7 +728,7 @@ class Jester(commands.Cog):
         # мгновенный мем-звук по точной ключевой фразе (редко, с кулдауном)
         if now - session.last_sound_time > SOUND_COOLDOWN:
             tag = soundboard.keyword_match(text)
-            if tag:
+            if tag and tag not in session.recent_sounds:
                 session.last_sound_time = now
                 self.bot.loop.create_task(self._play_sound(session, tag))
         session.history.append({"role": "user", "content": f"{name}: {text}"})
@@ -742,7 +772,8 @@ class Jester(commands.Cog):
                 # spoke_end — момент, когда человек договорил; от него и меряем задержку.
                 spoke_end, t_wait = session.last_msg_time, time.monotonic()
                 try:
-                    reply = await llm.voice_chat(list(session.history)[-RECENT_TURNS:], session.notes)
+                    reply = await llm.voice_chat(list(session.history)[-RECENT_TURNS:], session.notes,
+                                                 tuple(session.recent_sounds))
                 except Exception as e:
                     await self._report_error(session, "Мозг не ответил", e)
                     return
@@ -781,11 +812,25 @@ class Jester(commands.Cog):
             print(f"[jester] summarize error: {e!r}")
 
     async def _interject(self, session: JesterSession):
-        reply = await llm.interject(list(session.history)[-RECENT_TURNS:], session.notes)
+        reply = await llm.interject(list(session.history)[-RECENT_TURNS:], session.notes,
+                                    tuple(session.recent_sounds))
         if self._too_similar(session, reply):
             return
         session.history.append({"role": "assistant", "content": reply})
         await self._speak(session, reply)
+
+    def _is_echo(self, session: JesterSession, text: str) -> bool:
+        """Свой голос вернулся через чужой микрофон и распознался как чужая реплика.
+        Раньше такое попадало в историю, и бот спорил сам с собой — отсюда «несёт хуйню».
+        Проверяем только сразу после своей реплики и по совпадению с ней, чтобы не
+        глушить живого человека, который говорит поверх бота."""
+        if not session.last_spoken_text or len(text) < 6:
+            return False
+        if not session.bot_speaking and time.monotonic() - session.bot_quiet_since > ECHO_WINDOW:
+            return False
+        a, b = text.lower(), session.last_spoken_text.lower()
+        m = difflib.SequenceMatcher(None, a, b).find_longest_match(0, len(a), 0, len(b))
+        return m.size >= max(10, len(a) * ECHO_MATCH)
 
     def _too_similar(self, session: JesterSession, text: str) -> bool:
         recent = [m["content"] for m in list(session.history)[-6:] if m["role"] == "assistant"]
@@ -804,9 +849,10 @@ class Jester(commands.Cog):
             text = text[m.end():]
         text = SOUND_TAG_ANY.sub("", text).strip()
         try:
-            if tag and soundboard.exists(tag):
+            if tag and soundboard.exists(tag) and tag not in session.recent_sounds:
                 await self._play_sound(session, tag)
             if text:
+                session.last_spoken_text = text
                 path = os.path.join(tempfile.gettempdir(), f"speak_{uuid.uuid4().hex}.mp3")
                 await tts.synthesize(text, path, session.voice_key)
                 await ears.play(session.guild_id, path)
@@ -827,6 +873,7 @@ class Jester(commands.Cog):
             return False
         try:
             session.last_sound_time = time.monotonic()
+            session.recent_sounds.append(tag)
             await self._play_asset(session, p)
             return True
         except Exception as e:

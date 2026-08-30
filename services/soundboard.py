@@ -44,13 +44,18 @@ def all_tags() -> list[str]:
     return sorted(SOUNDS)
 
 
-def random_tag() -> str | None:
-    return random.choice(list(SOUNDS)) if SOUNDS else None
+def random_tag(exclude: tuple[str, ...] = ()) -> str | None:
+    pool = [t for t in SOUNDS if t not in exclude] or list(SOUNDS)
+    return random.choice(pool) if pool else None
 
 
-def llm_menu() -> str:
-    """Компактный список доступных модели звуков «tag — когда уместно», через ;."""
-    items = [f"{t} — {s['desc']}" for t, s in SOUNDS.items() if s["llm"]]
+def llm_menu(exclude: tuple[str, ...] = ()) -> str:
+    """Компактный список доступных модели звуков «tag — когда уместно», через ;.
+
+    exclude — недавно игравшие теги: модель цепляется за одни и те же варианты из списка,
+    поэтому свежесыгранные просто не показываем.
+    """
+    items = [f"{t} — {s['desc']}" for t, s in SOUNDS.items() if s["llm"] and t not in exclude]
     return "; ".join(items)
 
 

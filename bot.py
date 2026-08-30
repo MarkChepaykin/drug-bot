@@ -49,6 +49,12 @@ def _on_speaking(data):
         cog.handle_speaking(data)
 
 
+def _on_bot_speaking(data):
+    cog = bot.get_cog("Jester")
+    if cog and bot.loop and not bot.loop.is_closed():
+        cog.handle_bot_speaking(data)
+
+
 def _on_music_state(data):
     cog = bot.get_cog("Jester")
     if cog and bot.loop and not bot.loop.is_closed():
@@ -59,6 +65,7 @@ def _on_music_state(data):
 keepalive.on_utterance = _on_utterance
 keepalive.on_speaking = _on_speaking
 keepalive.on_music_state = _on_music_state
+keepalive.on_bot_speaking = _on_bot_speaking
 
 if __name__ == "__main__":
     if not config.DISCORD_TOKEN:
