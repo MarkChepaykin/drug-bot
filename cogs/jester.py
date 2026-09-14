@@ -12,7 +12,7 @@ from collections import deque
 import discord
 from discord.ext import commands
 
-from services import ears, llm, music, soundboard, stt, tts, voiceclips
+from services import ears, llm, memory, music, soundboard, stt, tts, voiceclips
 
 # Голосом (соединение, приём и проигрывание) управляет Node-сервис ears
 # (discord.js + DAVE E2EE). Python — мозг: STT, персона, решения когда говорить.
@@ -20,7 +20,11 @@ from services import ears, llm, music, soundboard, stt, tts, voiceclips
 # Сколько секунд тишины ждать перед ответом в диалоге 1:1 — даёт человеку закончить
 # мысль, а не отвечать на каждый обрывок фразы (речь режется на куски по паузам).
 # Продлевается в реальном времени сигналом /speaking, так что можно держать коротким.
-TURN_GAP = 1.3
+# Отсчёт идёт от конца речи, а ears до этого уже отмолчал свои 1.1с тишины (AfterSilence) —
+# человек ждёт сумму. Резать AfterSilence нельзя: чем он меньше, тем на больше кусков
+# режется фраза и тем быстрее выбирается лимит whisper (20 запросов в минуту на free).
+# Поэтому экономим здесь: 0.9с — минимум, на котором бот ещё не перебивает.
+TURN_GAP = 0.9
 # Сколько секунд тишины ждать перед репликой, когда говорят несколько человек.
 GROUP_GAP = 5
 # В группе (несколько активных) бот вклинивается РЕДКО: не на каждую паузу и не чаще
@@ -33,6 +37,12 @@ ACTIVE_WINDOW = 60
 MAX_EXTRA_WAIT = 2.5
 # Сколько последних звуков не предлагать модели и не играть повторно.
 RECENT_SOUNDS = 6
+# Пока в войсе идёт живой разговор, держим GPU Modal (голос Максима) тёплым: он гаснет
+# через две минуты простоя, а холодный старт — это десятки секунд тишины на первой же
+# фразе после паузы. Греем, пока с последней распознанной реплики прошло меньше N секунд,
+# чтобы не жечь GPU-кредиты, когда компания просто молча слушает музыку.
+WARM_WINDOW = 600
+WARM_EVERY = 45
 # Сколько секунд после своей реплики бот считает входящую речь возможным эхом
 # (у людей нет наушников — его же голос возвращается в их микрофоны).
 ECHO_WINDOW = 3.0
@@ -92,6 +102,35 @@ GENERIC_QUERY_RE = re.compile(
 # более долгая память — через session.notes, которые сжимаются отдельно).
 RECENT_TURNS = 14
 
+# Настоящий вопрос (а не трёп) — на него отвечаем по делу и подлиннее, llm.voice_chat(answer=True).
+# Режим ответа раньше был один на всё («одна фраза, 5-10 слов»), и на «как сделать X» бот
+# физически не мог выдать ничего, кроме отмазки — именно это компания звала «тупит».
+QUESTION_RE = re.compile(
+    r"\bкак(?:ой|ая|ое|ие|ого|ому)?\b|\bпочему\b|\bзачем\b|\bотчего\b|\bсколько\b"
+    r"|\bчто\s+так\w+|\bкто\s+так\w+|\bчто\s+знач\w+|\bчем\s+отлич\w+"
+    r"|\bв\s+чём\s+разниц\w+|\bчто\s+лучше\b|\bкак\s+назы\w+"
+    r"|\bобъясни\b|\bрасскажи\b|\bподскажи\b|\bпосоветуй\b|\bпосчитай\b"
+    r"|\bпереведи\b|\bнапомни\b",
+    re.IGNORECASE,
+)
+# «как бы», «так как», «как дела» — не вопрос, на такое нужна колкость, а не доклад.
+NOT_QUESTION_RE = re.compile(
+    r"\bкак\s+(?:дела|жизнь|ты|сам|оно|там|бы|раз|будто|то|всегда|обычно)\b"
+    r"|\bтак\s+как\b|\bкое[\s-]как\b|\bчто\s+(?:нового|как)\b",
+    re.IGNORECASE,
+)
+
+
+def _wants_answer(text: str) -> bool:
+    low = text.lower().strip()
+    if not QUESTION_RE.search(low):
+        return False
+    if NOT_QUESTION_RE.search(low) and not low.endswith("?"):
+        return False
+    # обрывок в два-три слова — обычно криво распознанный кусок фразы, а не вопрос
+    return len(low.split()) >= 4 or low.endswith("?")
+
+
 # Мем-звук в реплике модели: [звук:тег] в начале. Вырезаем и проигрываем вместо чтения вслух.
 # Модель пишет тег как придётся: [звук:bruh], [sound:bruh], просто [bruh]. Ловим все формы —
 # иначе нераспознанная скобка уходила в озвучку и бот читал вслух «саунд брух».
@@ -122,8 +161,13 @@ class JesterSession:
         self.lines_since_sum = 0
         self.authors: dict[int, float] = {}
         self.last_msg_time = 0.0
+        # время последней РАСПОЗНАННОЙ реплики (в отличие от last_msg_time, который двигают
+        # и пинги «кто-то шуршит в микрофон») — по нему решаем, греть ли GPU под голос
+        self.last_line_time = 0.0
         self.pending: asyncio.Task | None = None
         self.turn_direct = False
+        # в накопленных за ход репликах был настоящий вопрос -> отвечаем по делу
+        self.turn_answer = False
         self.music_active = False
         self.radio_mode = False
         self.repeat_on = False
@@ -200,12 +244,25 @@ class Jester(commands.Cog):
             await ctx.followup.send(f"Не смог подключиться к голосу: `{type(e).__name__}: {e}`")
             return None
         session = JesterSession(ctx.guild.id, ctx.channel, self.default_voice_key, channel.id)
+        # заметки о компании переживают выход из войса — бот заходит помня прошлые разговоры
+        session.notes = memory.load(ctx.guild.id)
+        if session.notes:
+            print(f"[jester] поднял заметки о компании ({len(session.notes)} символов)", flush=True)
         self.sessions[ctx.guild.id] = session
-        self.bot.loop.create_task(tts.warm())  # заранее будим GPU Modal под голос Максима
+        self.bot.loop.create_task(tts.warm(force=True))  # заранее будим GPU Modal под голос Максима
+        self.bot.loop.create_task(self._keep_warm(session))
         if greet:
             names = [m.display_name for m in channel.members if not m.bot]
             self.bot.loop.create_task(self._greet(session, names))
         return session
+
+    async def _keep_warm(self, session: JesterSession):
+        """Фоновый пинг GPU Modal, пока компания разговаривает. Без него каждая пауза
+        дольше двух минут стоила холодного старта на первой же ответной фразе."""
+        while session.active:
+            await asyncio.sleep(WARM_EVERY)
+            if session.last_line_time and time.monotonic() - session.last_line_time < WARM_WINDOW:
+                await tts.warm(force=True)
 
     async def _report_error(self, session: JesterSession, prefix: str, e: Exception):
         """Шлёт ⚠️ в канал, но не чаще раза в минуту — иначе при затяжном сбое (например,
@@ -467,6 +524,16 @@ class Jester(commands.Cog):
         # уходил в групповой режим (пауза 8с + шанс 30% + кулдаун 35с) = молчал всю сессию.
         session.last_msg_time = time.monotonic()
 
+    def _stt_hint(self, session: JesterSession) -> str:
+        """Контекст для Whisper: кличка бота и имена сидящих в войсе. Без него распознавание
+        регулярно корёжило и имена, и само обращение «друг» — бот не понимал, что зовут его."""
+        channel = self.bot.get_channel(session.voice_channel_id)
+        names = [m.display_name for m in channel.members if not m.bot][:8] if channel else []
+        hint = "Разговор друзей в Discord. Бота зовут Друг."
+        if names:
+            hint += " Участники: " + ", ".join(names) + "."
+        return hint
+
     async def handle_utterance(self, data: dict):
         session = self.sessions.get(int(data["guild_id"]))
         path = data.get("path", "")
@@ -476,12 +543,15 @@ class Jester(commands.Cog):
         try:
             if not session or not session.active:
                 return
+            # Пока идут STT и мозг, держим GPU Modal тёплым: он гаснет через 2 минуты
+            # простоя, и первая фраза после паузы иначе ловит холодный старт.
+            self.bot.loop.create_task(tts.warm())
             try:
                 wav = open(path, "rb").read()
             except OSError:
                 return
             try:
-                text = await stt.transcribe(wav)
+                text = await stt.transcribe(wav, self._stt_hint(session))
             except Exception as e:
                 print(f"[jester] stt error: {e!r}")
                 return
@@ -717,6 +787,7 @@ class Jester(commands.Cog):
         now = time.monotonic()
         session.authors[author_id] = now
         session.last_author = author_id
+        session.last_line_time = now
         # Пауза-ожидание считается от конца речи, а не от прихода расшифровки: STT занимает
         # секунду-полторы, и раньше она молча прибавлялась к TURN_GAP — отсюда «долго думает».
         # max() защищает от отката назад, если человек уже заговорил снова, пока шло распознавание.
@@ -736,6 +807,7 @@ class Jester(commands.Cog):
                 self.bot.loop.create_task(self._play_sound(session, tag))
         session.history.append({"role": "user", "content": f"{name}: {text}"})
         session.turn_direct = session.turn_direct or direct
+        session.turn_answer = session.turn_answer or _wants_answer(text)
         session.lines_since_sum += 1
         if session.lines_since_sum >= 25:
             session.lines_since_sum = 0
@@ -751,7 +823,7 @@ class Jester(commands.Cog):
         try:
             while True:
                 active = sum(1 for t in session.authors.values() if time.monotonic() - t < ACTIVE_WINDOW)
-                gap = TURN_GAP if (session.turn_direct or active <= 1) else GROUP_GAP
+                gap = TURN_GAP if (session.turn_direct or session.turn_answer or active <= 1) else GROUP_GAP
                 remaining = gap - (time.monotonic() - session.last_msg_time)
                 # Потолок: открытый микрофон и эхо музыки шлют «говорит» без пауз, и без него
                 # ожидание не кончалось бы никогда — бот молчал бы всю сессию.
@@ -761,7 +833,9 @@ class Jester(commands.Cog):
             if not session.active:
                 return
             direct = session.turn_direct
+            answer = session.turn_answer
             session.turn_direct = False
+            session.turn_answer = False
             active = sum(1 for t in session.authors.values() if time.monotonic() - t < ACTIVE_WINDOW)
             # изредка вместо своей реплики — неожиданно вставить чью-то прошлую фразу
             # его же голосом (не когда обращаются напрямую и не поверх музыки)
@@ -776,7 +850,7 @@ class Jester(commands.Cog):
                 spoke_end, t_wait = session.last_msg_time, time.monotonic()
                 try:
                     reply = await llm.voice_chat(list(session.history)[-RECENT_TURNS:], session.notes,
-                                                 tuple(session.recent_sounds))
+                                                 tuple(session.recent_sounds), answer=answer)
                 except Exception as e:
                     await self._report_error(session, "Мозг не ответил", e)
                     return
@@ -786,8 +860,9 @@ class Jester(commands.Cog):
                 session.history.append({"role": "assistant", "content": reply})
                 await self._speak(session, reply)
                 t_end = time.monotonic()
-                print(f"[jester] ответ за {t_end - spoke_end:.1f}с (пауза+stt {t_wait - spoke_end:.1f}"
-                      f" / llm {t_llm - t_wait:.1f} / озвучка {t_end - t_llm:.1f})", flush=True)
+                print(f"[jester] ответ{' по делу' if answer else ''} за {t_end - spoke_end:.1f}с "
+                      f"(пауза+stt {t_wait - spoke_end:.1f} / llm {t_llm - t_wait:.1f}"
+                      f" / озвучка {t_end - t_llm:.1f})", flush=True)
             else:
                 now = time.monotonic()
                 # много активных — чаще молчим: не на каждую групповую паузу и с кулдауном
@@ -810,6 +885,7 @@ class Jester(commands.Cog):
         lines = [m["content"] for m in list(session.history) if m["role"] == "user"][-25:]
         try:
             session.notes = await llm.summarize(session.notes, lines)
+            memory.save(session.guild_id, session.notes)
             print(f"[jester] заметки обновлены ({len(session.notes)} символов)", flush=True)
         except Exception as e:
             print(f"[jester] summarize error: {e!r}")

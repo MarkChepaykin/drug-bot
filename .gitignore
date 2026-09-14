@@ -15,3 +15,6 @@ youtube_cookies.txt
 modal_maxim/*.pth
 modal_maxim/*.index
 .modal.toml
+
+# заметки бота о компании (services/memory.py)
+data/

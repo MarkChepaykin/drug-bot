@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import edge_tts
 import httpx
@@ -58,10 +59,23 @@ async def _rvc_synth(text: str, path: str) -> bool:
         return False
 
 
-async def warm() -> None:
-    """Разбудить GPU Modal заранее (зовём при /join), чтобы не ловить холодный старт."""
+# Modal гасит GPU-контейнер через scaledown_window (сейчас 2 мин) после последнего
+# запроса. Греем не только при /join, но и на каждую услышанную реплику: иначе первая
+# фраза после любой паузы в разговоре ловила холодный старт на десятки секунд —
+# со стороны это и есть «бот жутко тормозит».
+WARM_EVERY = 45.0
+_last_warm = 0.0
+
+
+async def warm(force: bool = False) -> None:
+    """Разбудить/удержать GPU Modal. Зовётся часто — лишние пинги режет троттлинг."""
+    global _last_warm
     if not config.RVC_WARM:
         return
+    now = time.monotonic()
+    if not force and now - _last_warm < WARM_EVERY:
+        return
+    _last_warm = now
     try:
         async with httpx.AsyncClient(timeout=15.0) as c:
             await c.get(config.RVC_WARM)
