@@ -137,8 +137,10 @@ def _wants_answer(text: str) -> bool:
 SOUND_TAG_HEAD = re.compile(r"^\s*\[\s*(?:звук|sound)?\s*:?\s*([a-zа-яё0-9_\-]+)\s*\]\s*", re.IGNORECASE)
 # Всё остальное в квадратных скобках вырезаем целиком: вслух его читать нельзя в любом случае.
 SOUND_TAG_ANY = re.compile(r"\[[^\]]{0,40}\]")
-# Не чаще одного авто-звука (по ключевым словам) раз в N секунд на сессию.
-SOUND_COOLDOWN = 12
+# Не чаще одного звука раз в N секунд на сессию — общий лимит и на авто-звуки по ключевым
+# словам, и на теги [звук:тег] от модели. Раньше кулдаун держал только первый канал, а
+# модель могла лепить звук в КАЖДУЮ реплику — отсюда «спамит звуками вместо ответов».
+SOUND_COOLDOWN = 45
 # Голосовые нарезки людей: изредка вставляем чью-то прошлую фразу его же голосом.
 CLIP_CALLBACK_CHANCE = 0.12
 CLIP_COOLDOWN = 150
@@ -928,7 +930,16 @@ class Jester(commands.Cog):
             text = text[m.end():]
         text = SOUND_TAG_ANY.sub("", text).strip()
         try:
-            if tag and soundboard.exists(tag) and tag not in session.recent_sounds:
+            if tag and not soundboard.exists(tag):
+                tag = None
+            # Звук просят слишком часто или он только что играл — выкидываем его, реплика
+            # уходит словами. Если слов нет вообще (модель ответила одним тегом), звук
+            # оставляем: молчание вместо ответа хуже лишнего звука.
+            if (tag and text and (tag in session.recent_sounds
+                                  or time.monotonic() - session.last_sound_time < SOUND_COOLDOWN)):
+                print(f"[jester] звук {tag} не играю: кулдаун или повтор", flush=True)
+                tag = None
+            if tag:
                 await self._play_sound(session, tag)
             if text:
                 session.last_spoken_text = text

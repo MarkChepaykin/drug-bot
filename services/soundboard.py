@@ -49,14 +49,19 @@ def random_tag(exclude: tuple[str, ...] = ()) -> str | None:
     return random.choice(pool) if pool else None
 
 
-def llm_menu(exclude: tuple[str, ...] = ()) -> str:
+def llm_menu(exclude: tuple[str, ...] = (), limit: int = 8) -> str:
     """Компактный список доступных модели звуков «tag — когда уместно», через ;.
 
-    exclude — недавно игравшие теги: модель цепляется за одни и те же варианты из списка,
-    поэтому свежесыгранные просто не показываем.
+    exclude — недавно игравшие теги, их не показываем.
+    limit — сколько вариантов показать за раз. Модель жмёт первые попавшиеся из списка и
+    цепляется за знакомые названия, поэтому каталог целиком ей не отдаём: каждый запрос
+    получает СВОЮ случайную выборку. Без этого играли одни и те же три-четыре звука,
+    сколько бы их ни лежало в папке.
     """
-    items = [f"{t} — {s['desc']}" for t, s in SOUNDS.items() if s["llm"] and t not in exclude]
-    return "; ".join(items)
+    items = [(t, s["desc"]) for t, s in SOUNDS.items() if s["llm"] and t not in exclude]
+    if limit and len(items) > limit:
+        items = random.sample(items, limit)
+    return "; ".join(f"{t} — {d}" for t, d in items)
 
 
 # Ключевые фразы → звук (мгновенно, без участия модели). Точные и редкие,
