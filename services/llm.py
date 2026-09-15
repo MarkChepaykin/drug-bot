@@ -2,7 +2,7 @@ import asyncio
 import re
 
 import httpx
-from groq import Groq, RateLimitError
+from groq import Groq, NotFoundError, RateLimitError
 
 import config
 from services import soundboard
@@ -34,17 +34,26 @@ PERSONA = (
 )
 
 # Режим «трёп»: обычная болтовня, где от бота нужна колкость, а не доклад.
+# ВАЖНО про примеры: их схемы должны быть РАЗНЫМИ. Когда оба примера были вида «X? Ты Y.»,
+# модель копировала именно эту схему — на 6 запросов подряд выходило 2 разные реплики
+# («Семь? Ты марафонец, а не игрок» три раза). С разношёрстными примерами — 6 из 6.
 BANTER_RULES = (
     "\nДЛИНА: одна фраза, 5-10 слов. ОДНО предложение, не два. Короткая колкость в лоб — и всё. "
     "Длинная складная речь = провал, даже если она умная.\n"
     "Отвечай ВСЕГДА и НИКОГДА не отвечай пустотой: даже если говорили не с тобой, вставь свои "
     "пять копеек — это твоя компания и твой разговор.\n"
+    "КАЖДЫЙ РАЗ МЕНЯЙ КОНСТРУКЦИЮ. Не начинай раз за разом с переспроса («Семь? ...»), не лепи "
+    "подряд ярлыки «ты — такой-то». Повторил свою же схему из прошлых реплик — провалился.\n"
     "ЗАПРЕЩЕНО: сравнения и метафоры («как ..., только ...», «это вроде ...»), объяснять свою "
     "шутку, пересказывать сказанное, вступления («ну», «да уж», «классика», «о,»), морали и "
     "выводы в конце, перечисления.\n"
-    "Примеры длины и манеры (не копируй текст):\n"
+    "Цепляйся за конкретную деталь последней реплики — число, слово, имя, — а не за тему вообще.\n"
+    "Примеры манеры (схемы разные, текст не копируй):\n"
     "Саня: я вчера три часа в очереди простоял → Три часа стоял? Ты мебель.\n"
-    "Лёха: короче я эту хуйню так и не починил → Ожидаемо. Руки под пиво заточены."
+    "Лёха: короче я эту хуйню так и не починил → Ожидаемо. Руки под пиво заточены.\n"
+    "Гоша: я вообще не устал → Поэтому глаза красные, ага.\n"
+    "Саня: седьмая катка пошла → Семь. Отоспишься в гробу.\n"
+    "Лёха: да нормально всё → Слышно, что нормально."
 )
 
 # Режим «по делу»: спросили что-то настоящее — ответ важнее подъёба.
@@ -132,15 +141,26 @@ def _with_notes(system: str, notes: str) -> str:
     return system
 
 
-# Обе линейки моделей на Groq думают перед ответом, и думалка тратит тот же max_tokens.
-# qwen понимает "none" — думать не надо совсем (и без этого сыпет <think> прямо в реплику);
-# gpt-oss "none" не принимает, у него минимум "low".
-if config.LLM_MODEL.startswith("qwen/"):
-    _EXTRA = {"reasoning_effort": "none"}
-elif config.LLM_MODEL.startswith("openai/gpt-oss"):
-    _EXTRA = {"reasoning_effort": "low"}
-else:
-    _EXTRA = {}
+# Выше 0.8 не поднимать: замерено и на qwen, и на gpt-oss — растёт доля ПУСТЫХ ответов
+# и задержка (у gpt-oss-120b при 1.0 медиана скакнула с 1.3с до 8.9с).
+TEMPERATURE = 0.8
+
+# Groq периодически выпиливает модели из-под бота: v38 — llama-3.3-70b, v47 — qwen3.6-27b.
+# Каждый раз это полная тишина в войсе и 404 в каждом запросе, пока не поправишь конфиг и
+# не дождёшься редеплоя. Поэтому держим запасные и переключаемся на лету.
+FALLBACK_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+_model = config.LLM_MODEL
+
+
+def _extra(model: str) -> dict:
+    """Обе линейки думают перед ответом, и думалка тратит тот же max_tokens.
+    qwen понимает "none" — не думать совсем (без этого сыпет <think> прямо в реплику);
+    gpt-oss "none" не принимает, у него минимум "low"."""
+    if model.startswith("qwen/"):
+        return {"reasoning_effort": "none"}
+    if model.startswith("openai/gpt-oss"):
+        return {"reasoning_effort": "low"}
+    return {}
 
 
 def _clean(text: str) -> str:
@@ -151,30 +171,51 @@ def _clean(text: str) -> str:
     return _NAME_PREFIX.sub("", text, count=1)
 
 
-async def chat(history: list[dict], system: str = CHAT_SYSTEM, max_tokens: int = 800) -> str:
-    def _call():
+async def _complete(messages: list[dict], max_tokens: int):
+    """Один запрос к Groq: переживает и пропажу модели, и короткий rate limit."""
+    global _model
+
+    def _call(model):
         return _client.chat.completions.create(
-            model=config.LLM_MODEL,
-            temperature=0.8,
+            model=model,
+            temperature=TEMPERATURE,
             max_tokens=max_tokens,
-            messages=[{"role": "system", "content": system}] + history,
-            **_EXTRA,
+            messages=messages,
+            **_extra(model),
         )
 
     try:
-        resp = await asyncio.to_thread(_call)
+        return await asyncio.to_thread(_call, _model)
+    except NotFoundError:
+        # Модель выпилили из Groq — ищем живую замену прямо сейчас, а не в следующем деплое
+        for cand in FALLBACK_MODELS:
+            if cand == _model:
+                continue
+            try:
+                resp = await asyncio.to_thread(_call, cand)
+            except NotFoundError:
+                continue
+            print(f"[llm] модели {_model} больше нет в Groq — перешёл на {cand}", flush=True)
+            _model = cand
+            return resp
+        raise
     except RateLimitError as e:
         if "per day" in str(e) or "TPD" in str(e) or "RPD" in str(e):
             # суточный лимит — retry через 5с бессмысленен, сбросится через минуты/часы
             raise
         # короткий per-minute лимит — обычно отпускает за несколько секунд
         await asyncio.sleep(5)
-        resp = await asyncio.to_thread(_call)
+        return await asyncio.to_thread(_call, _model)
+
+
+async def chat(history: list[dict], system: str = CHAT_SYSTEM, max_tokens: int = 800) -> str:
+    messages = [{"role": "system", "content": system}] + history
+    resp = await _complete(messages, max_tokens)
     text = _clean(resp.choices[0].message.content or "")
     if not text:
         # Модель иногда молча отдаёт пустой ответ (особенно на групповой трёп без прямого
         # обращения) — в войсе это выглядит как «бот оглох». Пробуем ещё раз.
-        resp = await asyncio.to_thread(_call)
+        resp = await _complete(messages, max_tokens)
         text = _clean(resp.choices[0].message.content or "")
     return text
 
