@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 
 import httpx
 from groq import Groq, NotFoundError, RateLimitError
@@ -23,12 +24,17 @@ _client = Groq(**_kwargs)
 # Раньше правило «одна фраза 5-10 слов» было одно на всё, и на вопрос «как сделать X»
 # бот физически не мог ответить ничем, кроме отмазки — это и читалось как «тупой».
 PERSONA = (
-    "Ты — Друг: токсичный дерзкий кореш этой компании в Discord. По сути ты им друг и на их "
-    "стороне, но снаружи — сплошной подъёб.\n"
-    "Юмор: сухой, злой, конкретный — цепляйся за конкретное слово или факт из реплики, а не за "
-    "тему вообще. Мат к месту («похуй», «пиздец», «ебанулся») — в плюс, но не через слово. "
-    "Никого не одёргивай за мат.\n"
-    "Речь распознаётся с ошибками: если реплика — бессвязный обрывок, ехидно переспроси двумя "
+    "Ты — Друг: свой в этой компании в Discord, но с сигма-энергией — спокойный, ироничный, "
+    "ничему не удивляешься. Ты за них, просто не считаешь нужным это показывать.\n"
+    "Юмор nonchalant: сухая констатация, деланное безразличие, снисходительное согласие. "
+    "Ты не стараешься быть смешным и никогда не повышаешь тон — этим и могаешь. Цепляйся за "
+    "конкретное слово или факт из реплики, а не за тему вообще.\n"
+    "ЗАПРЕЩЕНО обзываться и вешать ярлыки («ты клоун», «ты мебель», «ты бревно»): так звучит "
+    "обиженный, а не тот, кто сверху. Не доказывай, не оправдывайся, не кипятись.\n"
+    "Мат — редко и вскользь («похуй», «пиздец»), не как главный приём. Никого не одёргивай за мат.\n"
+    "Сленг свой, зумерский: могнул, ратио, скилл ишью, база, изи, тильт, кринж — по одному "
+    "и к месту, не в каждой фразе.\n"
+    "Речь распознаётся с ошибками: если реплика — бессвязный обрывок, ровно переспроси двумя "
     "словами, а не выдумывай смысл.\n"
     "Чистый русский, без иероглифов и иностранщины. Без расизма и реальных угроз."
 )
@@ -38,22 +44,23 @@ PERSONA = (
 # модель копировала именно эту схему — на 6 запросов подряд выходило 2 разные реплики
 # («Семь? Ты марафонец, а не игрок» три раза). С разношёрстными примерами — 6 из 6.
 BANTER_RULES = (
-    "\nДЛИНА: одна фраза, 5-10 слов. ОДНО предложение, не два. Короткая колкость в лоб — и всё. "
+    "\nДЛИНА: 3-8 слов. ОДНО предложение, не два. Два слова — часто лучший ответ. "
     "Длинная складная речь = провал, даже если она умная.\n"
     "Отвечай ВСЕГДА и НИКОГДА не отвечай пустотой: даже если говорили не с тобой, вставь свои "
     "пять копеек — это твоя компания и твой разговор.\n"
     "КАЖДЫЙ РАЗ МЕНЯЙ КОНСТРУКЦИЮ. Не начинай раз за разом с переспроса («Семь? ...»), не лепи "
     "подряд ярлыки «ты — такой-то». Повторил свою же схему из прошлых реплик — провалился.\n"
-    "ЗАПРЕЩЕНО: сравнения и метафоры («как ..., только ...», «это вроде ...»), объяснять свою "
-    "шутку, пересказывать сказанное, вступления («ну», «да уж», «классика», «о,»), морали и "
-    "выводы в конце, перечисления.\n"
+    "ЗАПРЕЩЕНО: оскорбления и ярлыки, сравнения и метафоры («как ..., только ...»), объяснять "
+    "свою шутку, пересказывать сказанное, вступления («ну», «да уж», «классика», «о,»), морали "
+    "и выводы в конце, перечисления, восклицательные знаки.\n"
     "Цепляйся за конкретную деталь последней реплики — число, слово, имя, — а не за тему вообще.\n"
     "Примеры манеры (схемы разные, текст не копируй):\n"
-    "Саня: я вчера три часа в очереди простоял → Три часа стоял? Ты мебель.\n"
-    "Лёха: короче я эту хуйню так и не починил → Ожидаемо. Руки под пиво заточены.\n"
-    "Гоша: я вообще не устал → Поэтому глаза красные, ага.\n"
-    "Саня: седьмая катка пошла → Семь. Отоспишься в гробу.\n"
-    "Лёха: да нормально всё → Слышно, что нормально."
+    "Саня: я вчера три часа в очереди простоял → Сильный ход.\n"
+    "Лёха: короче я эту хуйню так и не починил → Ожидаемо.\n"
+    "Гоша: я вообще не устал → Заметно.\n"
+    "Саня: седьмая катка пошла → Тильт или азарт?\n"
+    "Лёха: да нормально всё → Верю.\n"
+    "Гоша: я его один в один вынес → Могнул, бывает."
 )
 
 # Режим «по делу»: спросили что-то настоящее — ответ важнее подъёба.
@@ -63,10 +70,46 @@ ANSWER_RULES = (
     "клавиш, цифры. Говори «сначала… потом… и всё» вместо нумерации.\n"
     "ЗАПРЕЩЕНЫ отмазки «гугли», «читай инструкцию», «зависит», «сам разберёшься». Не знаешь "
     "точно — дай самый рабочий вариант и одной фразой скажи, где можешь ошибаться.\n"
-    "ДЛИНА: 2-4 предложения, максимум 45 слов. Подъёб — ровно один, короткий, в самом конце, "
-    "и только если он не мешает ответу.\n"
+    "ДЛИНА: 1-3 предложения, максимум 35 слов — точный ответ в цель, а не лекция. Подъёб — "
+    "ровно один, короткий, в самом конце, и только если он не мешает ответу.\n"
     "Не пересказывай вопрос, без вступлений, без моралей и без «надеюсь, помог»."
 )
+
+
+# Лига — отдельный блок, а не часть характера: он стоит ~110 токенов входа, и платить
+# за него в каждом разговоре про работу и машины незачем. Подключаем, когда о ней речь.
+LOL_NOTE = (
+    "\nСЕЙЧАС РЕЧЬ О ЛИГЕ ЛЕГЕНД — ты в ней разбираешься и говоришь как играющий, а не как "
+    "зритель. Знаешь роли (топ, мид, адк, саппорт, лес), мету, руны, сборки, спайки, тайминги "
+    "драконов, геральда и барона, боль соло-кью и почему всегда виноват джанглер. "
+    "Термины (ганк, вижн, ластхиты, фарм, ротация, сплит, кайт, инт, фид, скилл ишью) "
+    "используешь как свои и НЕ объясняешь — их и так знают. "
+    "Спросили по делу (что собирать, кого пикать, кто контрит, почему слили) — отвечай "
+    "конкретно: чемпионы, предметы, тайминги, без воды и без списков.\n"
+    "Тебя ОЗВУЧИВАЮТ вслух по-русски, поэтому названия предметов и чемпионов пиши так, как "
+    "их произносят в русскоязычном комьюнити (Кракен, Бесконечный клинок, Кровожад, "
+    "Ясуо, Ли Син), а не латиницей."
+)
+
+# Слова, по которым видно, что разговор про Лигу. Сюда только характерное: «топ», «мета»,
+# «пик» и «бан» встречаются в обычном трёпе и давали бы ложные срабатывания.
+LOL_RE = re.compile(
+    r"\b(?:лига\s+легенд\w*|лол\b|lol\b|league\s+of\s+legends|катк\w+|соло\s?кью|солокью"
+    r"|элодж?\w*|ранкед\w*|мид\w{0,5}\b|адк\b|адц\b|саппорт\w*|суппорт\w*|джангл\w*"
+    r"|лесник\w*|топлейн\w*|ботлейн\w*|топер\w*|ганк\w*|вард\w*|вижн\w*|ластхит\w*|крип\w*|миньон\w*"
+    r"|ульт\w*|флеш\w*|барон\w*|дракон\w*|геральд\w*|герольд\w*|лейн\w*|к[еэ]рри\w*|нексус\w*|инхиб\w*|тильт\w*"
+    r"|фид(?:ит|ят|ил|ер|ерш?|ы)?\b|зафид\w*|сплитпуш\w*|кайт\w*|скилл\s?ишью"
+    r"|реворк\w*|нерф\w*|бафн\w*|шмурд\w*"
+    # чемпионы: только те, чьи имена не пересекаются с обычными словами
+    r"|ясуо|зед\b|изрил\w*|эзреаль|джинкс|кейтлин\w*|тимо\b|мастер\s?йи|ли\s?син|дариус"
+    r"|гарен|акали|катарин\w*|вейн\b|экко\b|вуконг|бриар\b|аатрокс|ирелия|камилл\w*"
+    r"|мальфит\w*|блицкранк|тарик\b|сорака|лулу\b|зери\b|ямато|вайлд\s?рифт)\b",
+    re.IGNORECASE,
+)
+
+
+def mentions_lol(text: str) -> bool:
+    return bool(LOL_RE.search(text or ""))
 
 
 def _sound_note(exclude: tuple[str, ...] = ()) -> str:
@@ -125,6 +168,26 @@ TRACK_SUGGEST_SYSTEM = (
     "Не повторяй то, что уже играло."
 )
 
+# Трек часто просят не названием, а описанием: «та песня из Аркейна, где Экко и Джинкс»,
+# «которая в рекламе играет», «голосом Грагаса». Модель тут работает переводчиком
+# описания в поисковый запрос — сам поиск дальше обычный.
+IDENTIFY_TRACK_SYSTEM = (
+    "Тебе описывают музыкальный трек намёками: сцена из фильма/сериала/игры/аниме, мем, "
+    "реклама, строчка из припева, «та самая песня где...». Пойми, что это за трек, и выдай "
+    "ОДИН поисковый запрос для YouTube, по которому он находится.\n"
+    "Ответ — только строка запроса: ни пояснений, ни кавычек, ни вариантов через запятую, "
+    "ни слов «вот» и «думаю».\n"
+    "Обычно это «Исполнитель - Название». Название пиши так, как оно подписано на YouTube "
+    "(на языке оригинала).\n"
+    "Если просят конкретную версию — кавер, «голосом такого-то», мем-версию, ускоренную, "
+    "из тиктока — ОБЯЗАТЕЛЬНО сохрани это уточнение в запросе, иначе найдётся оригинал "
+    "вместо нужного.\n"
+    "Имена персонажей, мемов и русских исполнителей пиши так, как их ищут в рунете.\n"
+    "Не уверен — всё равно дай самый вероятный запрос: из найденного потом выберут "
+    "нужное, а молчание не даёт ничего. НЕТ — только если описание бессмысленное или "
+    "речь вообще не о музыке."
+)
+
 SUMMARIZE_SYSTEM = (
     "Ты ведёшь личные заметки о компании друзей по их разговорам. Обнови заметки: объедини "
     "старые с новым куском разговора. Сохраняй факты о людях (интересы, привычки, кто как "
@@ -151,6 +214,94 @@ TEMPERATURE = 0.8
 FALLBACK_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
 _model = config.LLM_MODEL
 
+# Мелкие служебные запросы (выбор трека из найденного) шлём в модель поменьше: на free
+# у каждой модели свой суточный лимит, и незачем тратить бюджет «мозга» на выбор номера.
+SEARCH_MODEL = config.SEARCH_MODEL
+
+# Трёп идёт в быструю модель: замер на одном промпте — 0.26с против 1.3с у старшей, а
+# для колкости в три слова её ума хватает. Настоящие вопросы (answer=True) уходят в
+# старшую: там нужны знания, а не скорость — младшие модели на вопросах по Лиге
+# выдумывают несуществующие предметы и чемпионов.
+# Побочно это разносит расход на разные суточные лимиты: бюджет «умного» мозга больше
+# не сгорает на трёпе, а значит, к вечеру он ещё жив.
+FAST_MODEL = config.FAST_MODEL
+# Groq на free иногда ставит запрос в очередь: медиана трёпа 0.26с, но раз в десяток
+# запросов прилетает 8-10с. В живом разговоре такой ответ уже не нужен — не ждём его,
+# а переспрашиваем следующую модель, она обычно свободна.
+FAST_TIMEOUT = 4.0
+
+# Сколько токенов ушло за сегодня, по моделям. Один ответ в войсе — около 1500 токенов,
+# из них 97% — вход (промпт + история), так что суточные 200k на free выбираются примерно
+# за 130 реплик, то есть за один вечер. Без учёта это видно только по внезапной тишине.
+_day = time.strftime("%Y-%m-%d")
+_used: dict[str, int] = {}
+_calls: dict[str, int] = {}
+# Модель исчерпана/пропала — до какого времени её не трогать (monotonic).
+_blocked: dict[str, float] = {}
+# Что сказать компании о смене мозга: запасная модель тупее, и лучше, чтобы это была
+# видимая строчка в чате, а не молчаливая деградация, на которую все ругаются.
+_notice: str | None = None
+
+
+def pop_notice() -> str | None:
+    global _notice
+    notice, _notice = _notice, None
+    return notice
+
+
+def _roll_day() -> None:
+    global _day, _used, _calls
+    today = time.strftime("%Y-%m-%d")
+    if today != _day:
+        _day, _used, _calls = today, {}, {}
+
+
+def usage() -> dict[str, dict]:
+    """Расход за сегодня по моделям — для статуса и команды /tokens."""
+    _roll_day()
+    now = time.monotonic()
+    return {
+        m: {"tokens": _used.get(m, 0), "calls": _calls.get(m, 0),
+            "blocked_for": max(0, int(_blocked.get(m, 0) - now))}
+        for m in dict.fromkeys(list(_used) + list(_blocked) + [_model])
+    }
+
+
+def usage_line() -> str:
+    parts = []
+    for m, u in usage().items():
+        name = m.split("/")[-1]
+        row = f"{name}: {u['tokens'] / 1000:.1f}k за {u['calls']}"
+        if u["blocked_for"]:
+            row += f" (лимит, ещё {u['blocked_for'] // 60}м)"
+        parts.append(row)
+    return "; ".join(parts) or "пока ничего"
+
+
+def _note_usage(model: str, resp) -> None:
+    u = getattr(resp, "usage", None)
+    if not u:
+        return
+    _roll_day()
+    _used[model] = _used.get(model, 0) + (u.total_tokens or 0)
+    _calls[model] = _calls.get(model, 0) + 1
+
+
+def _daily_limit(e: Exception) -> bool:
+    msg = str(e)
+    return "per day" in msg or "TPD" in msg or "RPD" in msg
+
+
+def _block(model: str, e: Exception, default: float) -> None:
+    """Groq говорит в заголовке, через сколько лимит отпустит — ждём ровно столько."""
+    secs = default
+    try:
+        secs = float(getattr(getattr(e, "response", None), "headers", {}).get("retry-after") or default)
+    except (TypeError, ValueError):
+        pass
+    _blocked[model] = time.monotonic() + secs
+    print(f"[llm] {model}: лимит исчерпан, вернусь к нему через {secs / 60:.0f} мин", flush=True)
+
 
 def _extra(model: str) -> dict:
     """Обе линейки думают перед ответом, и думалка тратит тот же max_tokens.
@@ -171,70 +322,122 @@ def _clean(text: str) -> str:
     return _NAME_PREFIX.sub("", text, count=1)
 
 
-async def _complete(messages: list[dict], max_tokens: int):
-    """Один запрос к Groq: переживает и пропажу модели, и короткий rate limit."""
+async def _complete(messages: list[dict], max_tokens: int, temperature: float = TEMPERATURE,
+                    model: str | None = None, timeout: float | None = None,
+                    only_model: bool = False):
+    """Один запрос к Groq: переживает и пропажу модели, и оба вида лимита.
+    Суточный лимит на free — свой у КАЖДОЙ модели, поэтому исчерпанную откладываем и
+    доживаем день на запасной, а не молчим до утра («Мозг не ответил: 429 TPD»)."""
     global _model
+    _roll_day()
 
-    def _call(model):
-        return _client.chat.completions.create(
-            model=model,
-            temperature=TEMPERATURE,
+    def _call(m):
+        # со своим таймаутом отключаем и автоповторы SDK: два повтора по 4с — это уже
+        # 12 секунд молчания вместо быстрого перехода на другую модель
+        client = _client.with_options(timeout=timeout, max_retries=0) if timeout else _client
+        return client.chat.completions.create(
+            model=m,
+            temperature=temperature,
             max_tokens=max_tokens,
             messages=messages,
-            **_extra(model),
+            **_extra(m),
         )
 
-    try:
-        return await asyncio.to_thread(_call, _model)
-    except NotFoundError:
-        # Модель выпилили из Groq — ищем живую замену прямо сейчас, а не в следующем деплое
-        for cand in FALLBACK_MODELS:
-            if cand == _model:
+    wanted = model or _model
+    rest = [] if only_model else [m for m in FALLBACK_MODELS if m != wanted]
+    if model is not None and _model in rest:
+        # служебный вызов (трёп, выбор трека): если его модель занята, «умную» трогаем
+        # последней — её суточный бюджет нужен для ответов по делу
+        rest = [m for m in rest if m != _model] + [_model]
+    order = [wanted] + rest
+    last: Exception | None = None
+    for cand in order:
+        if _blocked.get(cand, 0) > time.monotonic():
+            continue
+        try:
+            resp = await asyncio.to_thread(_call, cand)
+        except NotFoundError as e:  # модель выпилили из Groq
+            last = e
+            _blocked[cand] = time.monotonic() + 86400
+            print(f"[llm] модели {cand} больше нет в Groq", flush=True)
+            continue
+        except RateLimitError as e:
+            last = e
+            if _daily_limit(e):
+                _block(cand, e, 3600)
                 continue
+            # короткий per-minute лимит — обычно отпускает за несколько секунд
+            await asyncio.sleep(5)
             try:
                 resp = await asyncio.to_thread(_call, cand)
-            except NotFoundError:
+            except Exception as e2:
+                last = e2
                 continue
-            print(f"[llm] модели {_model} больше нет в Groq — перешёл на {cand}", flush=True)
+        except Exception as e:  # таймаут, обрыв, 5xx — пробуем следующую модель
+            last = e
+            print(f"[llm] {cand}: {type(e).__name__}, беру следующую модель", flush=True)
+            continue
+        _note_usage(cand, resp)
+        if model is None and cand != _model:
+            global _notice
+            print(f"[llm] перешёл на {cand}", flush=True)
+            _notice = (f"{_model.split('/')[-1]} не отвечает (лимит или очередь) — "
+                       f"дальше думаю на {cand.split('/')[-1]}, не обессудьте.")
             _model = cand
-            return resp
-        raise
-    except RateLimitError as e:
-        if "per day" in str(e) or "TPD" in str(e) or "RPD" in str(e):
-            # суточный лимит — retry через 5с бессмысленен, сбросится через минуты/часы
-            raise
-        # короткий per-minute лимит — обычно отпускает за несколько секунд
-        await asyncio.sleep(5)
-        return await asyncio.to_thread(_call, _model)
+        return resp
+    raise last if last else RuntimeError("не осталось доступных моделей")
 
 
-async def chat(history: list[dict], system: str = CHAT_SYSTEM, max_tokens: int = 800) -> str:
+async def chat(history: list[dict], system: str = CHAT_SYSTEM, max_tokens: int = 800,
+               temperature: float = TEMPERATURE, model: str | None = None,
+               timeout: float | None = None, only_model: bool = False) -> str:
     messages = [{"role": "system", "content": system}] + history
-    resp = await _complete(messages, max_tokens)
+    resp = await _complete(messages, max_tokens, temperature, model, timeout, only_model)
     text = _clean(resp.choices[0].message.content or "")
     if not text:
-        # Модель иногда молча отдаёт пустой ответ (особенно на групповой трёп без прямого
-        # обращения) — в войсе это выглядит как «бот оглох». Пробуем ещё раз.
-        resp = await _complete(messages, max_tokens)
+        # Пустой ответ — это почти всегда «думалка» съела весь бюджет токенов, поэтому
+        # второй заход делаем с запасом: повтор один в один давал ту же пустоту за те же
+        # деньги (вход считается заново, а он тут 97% расхода).
+        resp = await _complete(messages, max_tokens * 3, temperature, model, timeout, only_model)
         text = _clean(resp.choices[0].message.content or "")
     return text
 
 
 async def voice_chat(history: list[dict], notes: str = "", recent_sounds: tuple[str, ...] = (),
-                     answer: bool = False) -> str:
-    """answer=True — человек задал настоящий вопрос: отвечаем по делу и подлиннее.
-    Мем-звук в таком ответе не предлагаем: он сбивает с сути."""
+                     answer: bool = False, allow_sound: bool = True, lol: bool = False) -> str:
+    """answer=True — человек задал настоящий вопрос: отвечаем по делу и на умной модели.
+    Мем-звук в таком ответе не предлагаем: он сбивает с сути.
+    allow_sound=False — звук сейчас на кулдауне и всё равно не проиграется, так что меню
+    звуков не отправляем: это 240 токенов входа на каждую реплику впустую.
+    lol=True — в разговоре Лига, подключаем знание игры."""
+    game = LOL_NOTE if lol else ""
     if answer:
-        return await chat(history, system=_with_notes(_VOICE_ANSWER_BASE, notes), max_tokens=250)
-    system = _with_notes(_VOICE_CHAT_BASE + _sound_note(recent_sounds), notes)
-    return await chat(history, system=system, max_tokens=100)
+        system = _with_notes(_VOICE_ANSWER_BASE + game, notes)
+        if not lol:
+            return await chat(history, system=system, max_tokens=250)
+        # Вопрос по Лиге строго на умной модели и без подмен: младшие тут не «чуть хуже»,
+        # а выдумывают несуществующих чемпионов и предметы («Пинтус», «Броня Пилюли»).
+        # Честное «не сейчас» лучше уверенной чуши.
+        try:
+            return await chat(history, system=system, max_tokens=250,
+                              model=config.LLM_MODEL, only_model=True)
+        except Exception as e:
+            print(f"[llm] умная модель недоступна для вопроса по Лиге: {e!r}", flush=True)
+            return "Мозг на лимите, по лиге спроси попозже."
+    menu = _sound_note(recent_sounds) if allow_sound else ""
+    return await chat(history, system=_with_notes(_VOICE_CHAT_BASE + game + menu, notes),
+                      max_tokens=100, model=FAST_MODEL, timeout=FAST_TIMEOUT)
 
 
-async def interject(history: list[dict], notes: str = "", recent_sounds: tuple[str, ...] = ()) -> str:
+async def interject(history: list[dict], notes: str = "", recent_sounds: tuple[str, ...] = (),
+                    allow_sound: bool = True, lol: bool = False) -> str:
+    menu = _sound_note(recent_sounds) if allow_sound else ""
     return await chat(
         history or [{"role": "user", "content": "(в канале пока тихо)"}],
-        system=_with_notes(_INTERJECT_BASE + _sound_note(recent_sounds), notes),
+        system=_with_notes(_INTERJECT_BASE + (LOL_NOTE if lol else "") + menu, notes),
         max_tokens=80,
+        model=FAST_MODEL,
+        timeout=FAST_TIMEOUT,
     )
 
 
@@ -244,6 +447,7 @@ async def greeting(member_names: list[str], notes: str = "") -> str:
         [{"role": "user", "content": f"В канале сидят: {who}. Ты заходишь — поздоровайся."}],
         system=_with_notes(GREETING_SYSTEM, notes),
         max_tokens=80,
+        model=FAST_MODEL,
     )
 
 
@@ -252,6 +456,7 @@ async def welcome(name: str, notes: str = "") -> str:
         [{"role": "user", "content": f"{name} только что зашёл в канал. Отреагируй."}],
         system=_with_notes(JOIN_SYSTEM, notes),
         max_tokens=80,
+        model=FAST_MODEL,
     )
 
 
@@ -266,4 +471,61 @@ async def suggest_track(notes: str, recent_titles: list[str], hint: str = "") ->
     if hint:
         content += f" Пожелание по треку от собеседника: «{hint}» — учти его при выборе."
     content += " Предложи следующий трек."
-    return await chat([{"role": "user", "content": content}], system=TRACK_SUGGEST_SYSTEM, max_tokens=40)
+    # max_tokens делится с «думалкой» модели (reasoning_effort у gpt-oss не выключается).
+    # На лимите в 40 токенов бюджет уходил на размышление: три ответа из четырёх были
+    # ПУСТЫЕ, четвёртый — обрезанный («Звери - До скор»), и бот писал «не нашёл, что
+    # включить» вместо музыки. Сам ответ короткий, лишние токены просто не тратятся.
+    text = await chat([{"role": "user", "content": content}], system=TRACK_SUGGEST_SYSTEM, max_tokens=300)
+    text = (text or "").strip().splitlines()[0].strip(" .«»\"'") if text and text.strip() else ""
+    if not text:
+        raise RuntimeError("модель не предложила трек")
+    return text
+
+
+# Общая температура 0.8 нужна трёпу: с ней бот не повторяет свои же шутки. Но поиск
+# трека — задача на знание, а не на выдумку: на 0.8 одна и та же просьба про Аркейн то
+# находила нужный трек, то не находила вовсе. Здесь разброс только вредит.
+SEARCH_TEMPERATURE = 0.2
+
+PICK_TRACK_SYSTEM = (
+    "Тебе дают просьбу включить музыку и пронумерованный список того, что нашлось на "
+    "YouTube. Выбери номер ролика, который и есть запрошенный трек.\n"
+    "Нужна САМА ПЕСНЯ (аудио или клип), а не нарезка сцены, реакция, обзор, разбор, "
+    "туториал, сборник или стрим — даже если они точнее совпадают со словами просьбы.\n"
+    "Если в просьбе есть уточнение (кавер, «голосом такого-то», ускоренная, мем-версия) — "
+    "нужен ролик именно с этим уточнением, а не оригинал.\n"
+    "Ответ — ОДНО ЧИСЛО и больше ничего. Если подходящего нет — 0."
+)
+
+
+async def pick_track(request: str, items: list[str]) -> int | None:
+    """Выбор нужного трека из того, что реально нашлось. Модели проще узнать трек в
+    списке, чем вспомнить его название по описанию. → номер (с 1) или None."""
+    listing = "\n".join(f"{i}. {t}" for i, t in enumerate(items, 1))
+    text = await chat(
+        [{"role": "user", "content": f"Просьба: «{request}».\nНашлось:\n{listing}\nНомер?"}],
+        system=PICK_TRACK_SYSTEM,
+        max_tokens=500,  # бюджет делится с «думалкой», иначе ответ пустой
+        temperature=SEARCH_TEMPERATURE,
+        model=SEARCH_MODEL,  # узнать нужное в готовом списке младшая модель тоже умеет
+    )
+    m = re.search(r"\d+", text or "")
+    if not m:
+        return None
+    n = int(m.group(0))
+    return n if 1 <= n <= len(items) else None
+
+
+async def identify_track(request: str) -> str | None:
+    """Описание трека → поисковый запрос. None — модель не поняла, о чём речь."""
+    text = await chat(
+        [{"role": "user", "content": f"Просьба: «{request}». Что это за трек?"}],
+        system=IDENTIFY_TRACK_SYSTEM,
+        max_tokens=400,  # бюджет делится с «думалкой», иначе ответ пустой
+        temperature=SEARCH_TEMPERATURE,
+    )
+    text = (text or "").strip()
+    line = text.splitlines()[0].strip(" .«»\"'") if text else ""
+    if not line or line.upper().startswith(("НЕТ", "NO", "НЕ ЗНА")):
+        return None
+    return line

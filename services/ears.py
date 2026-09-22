@@ -26,6 +26,12 @@ async def music(guild_id: int, url: str, title: str):
     r.raise_for_status()
 
 
+async def play_now(guild_id: int, url: str, title: str):
+    """Включить прямо сейчас вместо играющего (выбор другого варианта трека)."""
+    r = await _client.post(f"{EARS_URL}/playnow", json={"guild_id": str(guild_id), "url": url, "title": title})
+    r.raise_for_status()
+
+
 async def skip(guild_id: int):
     r = await _client.post(f"{EARS_URL}/skip", json={"guild_id": str(guild_id)})
     r.raise_for_status()

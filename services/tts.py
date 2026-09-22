@@ -1,4 +1,6 @@
 import asyncio
+import os
+import re
 import time
 
 import edge_tts
@@ -83,7 +85,32 @@ async def warm(force: bool = False) -> None:
         pass
 
 
+# Голос, которым договариваем, если основной пресет не отдал звук.
+FALLBACK_VOICE = "ru-RU-SvetlanaNeural"
+# Меньше этого размера mp3 не бывает — значит, синтез вернул пустоту.
+MIN_AUDIO_BYTES = 256
+
+
+def speakable(text: str) -> bool:
+    """Есть ли что озвучивать. На реплике из одних эмодзи/скобок edge-tts отвечает
+    NoAudioReceived — это не сбой, просто озвучивать нечего."""
+    return bool(re.search(r"[0-9A-Za-zЀ-ӿ]", text or ""))
+
+
+async def _edge_synth(text: str, path: str, preset: dict) -> None:
+    communicate = edge_tts.Communicate(
+        text,
+        preset["voice"],
+        rate=preset.get("rate", "+0%"),
+        pitch=preset.get("pitch", "+0Hz"),
+    )
+    await communicate.save(path)
+    if not os.path.isfile(path) or os.path.getsize(path) < MIN_AUDIO_BYTES:
+        raise RuntimeError("edge-tts вернул пустой файл")
+
+
 async def synthesize(text: str, path: str, voice_key: str | None = None) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
     preset = VOICES.get(voice_key) or {"voice": config.TTS_VOICE}
     if preset.get("engine") == "rvc":
         if await _rvc_synth(text, path):
@@ -98,11 +125,24 @@ async def synthesize(text: str, path: str, voice_key: str | None = None) -> str:
         )
         await proc.wait()
         return path
-    communicate = edge_tts.Communicate(
-        text,
-        preset["voice"],
-        rate=preset.get("rate", "+0%"),
-        pitch=preset.get("pitch", "+0Hz"),
-    )
-    await communicate.save(path)
-    return path
+    # Сервис Microsoft регулярно отвечает NoAudioReceived: то сам сбоит, то давится
+    # сдвигом тона/скорости. Раньше любая такая осечка = бот молча проглотил реплику,
+    # поэтому пробуем ещё раз, потом без эффектов, потом другим голосом.
+    attempts = [
+        preset,
+        preset,
+        {**preset, "rate": "+0%", "pitch": "+0Hz"},
+        {"voice": FALLBACK_VOICE},
+    ]
+    last: Exception | None = None
+    for i, attempt in enumerate(attempts):
+        try:
+            await _edge_synth(text, path, attempt)
+            if i:
+                print(f"[tts] озвучил с {i + 1}-й попытки ({attempt.get('voice')})", flush=True)
+            return path
+        except Exception as e:
+            last = e
+            print(f"[tts] попытка {i + 1} не дала звука: {e!r}", flush=True)
+            await asyncio.sleep(0.4)
+    raise last

@@ -347,6 +347,17 @@ function music(guildId, url, title) {
   if (!st.musicActive) nextTrack(guildId);
 }
 
+// «Не то, давай другой вариант» — заменить играющий трек прямо сейчас, не в конец очереди.
+function playNow(guildId, url, title) {
+  if (!getVoiceConnection(guildId)) throw new Error("not connected to voice");
+  const st = getState(guildId);
+  ensurePlayers(guildId);
+  st.musicQueue.unshift({ url, title });
+  st.lastTrack = null; // отменённый трек не возвращаем повтором
+  if (!st.musicActive) nextTrack(guildId);
+  else st.musicPlayer.stop(); // Idle -> nextTrack возьмёт наш трек первым
+}
+
 function skip(guildId) {
   const st = getState(guildId);
   // при скипе НЕ повторяем только что пропущенный трек, даже если включён повтор
@@ -416,6 +427,7 @@ const server = http.createServer((req, res) => {
       else if (req.url === "/leave") leave(gid);
       else if (req.url === "/play") play(gid, data.path);
       else if (req.url === "/music") music(gid, data.url, data.title);
+      else if (req.url === "/playnow") playNow(gid, data.url, data.title);
       else if (req.url === "/skip") skip(gid);
       else if (req.url === "/stopmusic") stopMusic(gid);
       else if (req.url === "/pausemusic") pauseMusic(gid);

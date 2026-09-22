@@ -15,6 +15,14 @@ RVC_WARM = os.getenv("RVC_WARM", "")      # GET, будит GPU при /join
 RVC_TOKEN = os.getenv("RVC_TOKEN", "")
 
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
+# Служебные запросы (выбор трека из найденного) — у младшей модели свой суточный лимит,
+# так что они не отъедают бюджет разговора.
+SEARCH_MODEL = os.getenv("SEARCH_MODEL", "openai/gpt-oss-20b")
+# Трёп в войсе — на быстрой модели. Замер на одном и том же промпте с историей:
+# qwen3.8-27b — 0.26с, gpt-oss-20b — 0.42с с выбросами до 11с и повторами фраз,
+# gpt-oss-120b — около 1.3с. Для ответа в три слова ума qwen хватает, а разница в
+# секунду в живом разговоре слышна. Вопросы по делу по-прежнему идут в LLM_MODEL.
+FAST_MODEL = os.getenv("FAST_MODEL", "qwen/qwen3.8-27b")
 STT_MODEL = os.getenv("STT_MODEL", "whisper-large-v3-turbo")
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ru")
 TTS_VOICE = os.getenv("TTS_VOICE", "ru-RU-DmitryNeural")

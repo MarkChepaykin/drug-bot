@@ -86,6 +86,18 @@ RADIO_RE = re.compile(
 QUEUE_FILL_RE = re.compile(
     r"\b(?:накидай|закинь|добавь)\b.{0,20}\b(?:треков|трек|песен|песни)\b", re.IGNORECASE
 )
+# «не то поставил», «давай другой вариант» — переключиться на следующий найденный
+# вариант того же запроса, не диктуя его заново. Срабатывает только когда варианты есть
+# и музыка играет, иначе ловило бы обычное «да не, не то» из разговора.
+WRONG_TRACK_RE = re.compile(
+    # голое «не то» ловим только на хвосте реплики: «что-то не то с этим билдом»
+    # и «не то чтобы» — обычный разговор, а не просьба переключить трек
+    r"\b(?:это\s+)?не\s+т[оа]т?\s*(?:песня|трек|вариант|музыка)?\s*[.!?,]*\s*$"
+    r"|\bне\s+т[оа]т?\s+(?:песн\w+|трек\w*|вариант\w*|верси\w+)\b"
+    r"|\bперепутал\b|\bдавай\s+другой\b"
+    r"|\bдруг(?:ой|ую)\s+(?:вариант\w*|верси\w+|трек)\b",
+    re.IGNORECASE,
+)
 QUEUE_FILL_DEFAULT = 5
 QUEUE_FILL_MAX = 8
 PLAY_RE = re.compile(
@@ -98,6 +110,8 @@ GENERIC_QUERY_RE = re.compile(
     r"^(?:что.?(?:-)?нибудь|что\s+угодно|люб(?:ую|ое|ой)|как(?:ую|ое|ой)?.?нибудь)$",
     re.IGNORECASE,
 )
+# Сколько последних реплик смотреть, чтобы понять, что разговор о Лиге.
+LOL_WINDOW = 6
 # Сколько последних реплик реально слать в LLM за раз (экономия токенов free-тарифа Groq;
 # более долгая память — через session.notes, которые сжимаются отдельно).
 RECENT_TURNS = 14
@@ -174,6 +188,8 @@ class JesterSession:
         self.radio_mode = False
         self.repeat_on = False
         self.played_titles: deque[str] = deque(maxlen=15)
+        # Что ещё нашлось по последнему запросу — на случай «не то включил».
+        self.track_options: list[dict] = []
         self.sleep_timer_task: asyncio.Task | None = None
         self.last_author = 0
         self.last_clip_time = 0.0
@@ -206,9 +222,30 @@ class VoiceSelect(discord.ui.Select):
         await self.cog._speak(self.session, preview)
 
 
+class TrackSelect(discord.ui.Select):
+    """Список других найденных вариантов под сообщением о треке: поиск иногда берёт
+    кавер или не ту версию, и это слышно только вживую — нужен способ переключиться."""
+
+    def __init__(self, cog, session, options: list[dict]):
+        self.cog = cog
+        self.session = session
+        self.cands = options[:5]
+        super().__init__(
+            placeholder="Не то? выбрать другой вариант",
+            options=[discord.SelectOption(label=music.label(c)[:100], value=str(i))
+                     for i, c in enumerate(self.cands)],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        cand = self.cands[int(self.values[0])]
+        if not await self.cog._switch_to(self.session, cand):
+            await interaction.followup.send("Этот вариант не открылся.", ephemeral=True)
+
+
 class Jester(commands.Cog):
-    # Гостям показываем только призыв/выход — остальное бот делает голосом, меню не захламляем.
-    PUBLIC_COMMANDS = {"join", "leave"}
+    # Гостям показываем призыв/выход и управление музыкой — остальное бот делает голосом.
+    PUBLIC_COMMANDS = {"join", "leave", "play", "skip", "stop", "pause", "resume", "queue", "repeat"}
 
     def __init__(self, bot):
         self.bot = bot
@@ -360,16 +397,14 @@ class Jester(commands.Cog):
         if not session:
             return
         try:
-            url, title = await music.resolve(query)
-            await ears.music(ctx.guild.id, url, title)
-        except Exception:
-            # буквальный поиск не сработал — пробуем подобрать по смыслу запроса
-            ok = await self._play_surprise(session, hint=query)
-            if not ok:
-                await ctx.followup.send("Не вышло с музыкой.")
+            title, options = await self._play_track(session, query)
+        except Exception as e:
+            # буквальный поиск не сработал — подбираем по смыслу, но честно говорим об этом,
+            # а не молча подсовываем другую песню вместо запрошенной
+            ok = await self._play_surprise(session, hint=query, note=f"Не нашёл «{query}» —")
+            await ctx.followup.send("Включил похожее." if ok else f"Не вышло: `{type(e).__name__}: {e}`")
             return
-        session.played_titles.append(title)
-        await ctx.followup.send(f"🎵 **{title}**")
+        await self._announce_track(session, title, options, send=ctx.followup.send)
 
     @discord.slash_command(description="Пропустить текущий трек")
     async def skip(self, ctx: discord.ApplicationContext):
@@ -453,6 +488,10 @@ class Jester(commands.Cog):
             return
         view = discord.ui.View(VoiceSelect(self, session), timeout=120)
         await ctx.respond("Выбери голос — я сразу скажу превью:", view=view, ephemeral=True)
+
+    @discord.slash_command(description="Сколько токенов Groq потрачено сегодня")
+    async def tokens(self, ctx: discord.ApplicationContext):
+        await ctx.respond(f"📊 За сегодня — {llm.usage_line()}", ephemeral=True)
 
     @discord.slash_command(description="Пусть вклинится в разговор прямо сейчас")
     async def joke(self, ctx: discord.ApplicationContext):
@@ -594,7 +633,55 @@ class Jester(commands.Cog):
         )
         await self._on_line(session, message.author.id, message.author.display_name, content, direct)
 
-    async def _play_surprise(self, session: JesterSession, hint: str = "") -> bool:
+    async def _play_track(self, session: JesterSession, query: str) -> tuple[str, list[dict]]:
+        """Найти и поставить в очередь. Возвращает название и запасные варианты.
+        identify — запасной ход для описаний вместо названий («та песня из Аркейна,
+        где Экко и Джинкс»): их буквальный поиск не вытягивает."""
+        url, title, options = await music.resolve_options(
+            query, identify=llm.identify_track, pick=llm.pick_track)
+        await ears.music(session.guild_id, url, title)
+        session.played_titles.append(title)
+        session.track_options = options
+        return title, options
+
+    async def _announce_track(self, session: JesterSession, title: str, options: list[dict],
+                              send=None, prefix: str = ""):
+        send = send or session.text_channel.send
+        text = f"{prefix} 🎵 **{title}**".strip()
+        if options:
+            await send(text, view=discord.ui.View(TrackSelect(self, session, options), timeout=900))
+        else:
+            await send(text)
+
+    async def _switch_to(self, session: JesterSession, cand: dict) -> bool:
+        """Заменить играющий трек другим вариантом того же запроса."""
+        try:
+            url, title = await music.stream(cand["url"])
+            await ears.play_now(session.guild_id, url, title)
+        except Exception as e:
+            await self._report_error(session, "Не смог переключить трек", e)
+            return False
+        session.played_titles.append(title)
+        session.track_options = [c for c in session.track_options if c["url"] != cand["url"]]
+        await self._announce_track(session, title, session.track_options)
+        return True
+
+    async def _next_option(self, session: JesterSession) -> bool:
+        if not session.track_options:
+            await self._speak(session, "Других вариантов нет.")
+            return False
+        return await self._switch_to(session, session.track_options[0])
+
+    async def _play_link(self, session: JesterSession, link: str):
+        """Ссылку можно просто кинуть в чат — включаем её, без слов-команд."""
+        try:
+            title, options = await self._play_track(session, link)
+        except Exception as e:
+            await self._report_error(session, "Не включил ссылку", e)
+            return
+        await self._announce_track(session, title, options)
+
+    async def _play_surprise(self, session: JesterSession, hint: str = "", note: str = "") -> bool:
         """Сам подбирает трек по настроению/заметкам о компании — для радио, «включи что-нибудь»
         и нечётких запросов вроде «музыку по кайфу», которые не резолвятся буквально."""
         try:
@@ -605,7 +692,8 @@ class Jester(commands.Cog):
             await self._report_error(session, "Не нашёл, что включить", e)
             return False
         session.played_titles.append(title)
-        await session.text_channel.send(f"🎵 **{title}**")
+        session.track_options = []  # трек выбрал сам бот — переключать «не то» не на что
+        await session.text_channel.send(f"{note} 🎵 **{title}**".strip())
         return True
 
     async def _sleep_timer(self, session: JesterSession, seconds: float):
@@ -622,6 +710,15 @@ class Jester(commands.Cog):
 
     async def _maybe_music_command(self, session: JesterSession, text: str) -> bool:
         low = text.lower()
+        link = music.find_link(text)
+        if link:
+            await self._play_link(session, link)
+            return True
+        # «не то» — частая фраза в разговоре, поэтому переключаем, только когда играет
+        # найденный по запросу трек и есть на что менять
+        if session.music_active and session.track_options and WRONG_TRACK_RE.search(low):
+            await self._next_option(session)
+            return True
         if LEAVE_RE.search(low):
             self.bot.loop.create_task(self._voice_leave(session))
             return True
@@ -712,15 +809,16 @@ class Jester(commands.Cog):
             await self._play_surprise(session)
             return True
         try:
-            url, title = await music.resolve(query)
-            await ears.music(session.guild_id, url, title)
-        except Exception:
+            title, options = await self._play_track(session, query)
+        except Exception as e:
             # запрос не похож на конкретное название ("по кайфу", "что-то бодрое") —
             # буквальный поиск не сработал, подбираем трек по смыслу этой фразы
-            await self._play_surprise(session, hint=query)
+            print(f"[jester] не нашёл «{query}»: {e!r}", flush=True)
+            await self._play_surprise(session, hint=query, note=f"Не нашёл «{query}» —")
             return True
-        session.played_titles.append(title)
-        await session.text_channel.send(f"🎵 **{title}**")
+        # в сообщение кладём и распознанный запрос: сразу видно, если STT расслышал
+        # не то слово, и не надо гадать, почему играет ерунда
+        await self._announce_track(session, title, options, prefix=f"«{query}» →")
         await self._speak(session, f"Включаю {title}")
         return True
 
@@ -852,12 +950,17 @@ class Jester(commands.Cog):
                 spoke_end, t_wait = session.last_msg_time, time.monotonic()
                 try:
                     reply = await llm.voice_chat(list(session.history)[-RECENT_TURNS:], session.notes,
-                                                 tuple(session.recent_sounds), answer=answer)
+                                                 tuple(session.recent_sounds), answer=answer,
+                                                 allow_sound=self._sound_ready(session),
+                                                 lol=self._lol_talk(session))
                 except Exception as e:
                     await self._report_error(session, "Мозг не ответил", e)
                     return
                 if self._too_similar(session, reply):
                     return
+                notice = llm.pop_notice()
+                if notice:
+                    await session.text_channel.send(f"⚠️ {notice}")
                 t_llm = time.monotonic()
                 session.history.append({"role": "assistant", "content": reply})
                 await self._speak(session, reply)
@@ -892,9 +995,23 @@ class Jester(commands.Cog):
         except Exception as e:
             print(f"[jester] summarize error: {e!r}")
 
+    def _lol_talk(self, session: JesterSession) -> bool:
+        """Говорят ли о Лиге прямо сейчас — знание игры подмешиваем в промпт только тогда,
+        иначе это лишние ~110 токенов входа в каждом разговоре про работу и машины.
+        Смотрим несколько последних реплик: «а что собирать?» идёт уже без слова «лига»."""
+        recent = " ".join(m["content"] for m in list(session.history)[-LOL_WINDOW:])
+        return llm.mentions_lol(recent)
+
+    def _sound_ready(self, session: JesterSession) -> bool:
+        """Звук на кулдауне всё равно будет выброшен в _speak, а меню звуков — это 240
+        токенов входа в каждом запросе. Не предлагаем то, что не сыграет."""
+        return time.monotonic() - session.last_sound_time >= SOUND_COOLDOWN
+
     async def _interject(self, session: JesterSession):
         reply = await llm.interject(list(session.history)[-RECENT_TURNS:], session.notes,
-                                    tuple(session.recent_sounds))
+                                    tuple(session.recent_sounds),
+                                    allow_sound=self._sound_ready(session),
+                                    lol=self._lol_talk(session))
         if self._too_similar(session, reply):
             return
         session.history.append({"role": "assistant", "content": reply})
@@ -941,7 +1058,9 @@ class Jester(commands.Cog):
                 tag = None
             if tag:
                 await self._play_sound(session, tag)
-            if text:
+            # реплика из одних эмодзи/скобок — озвучивать нечего, edge-tts на такой
+            # отвечает NoAudioReceived, и это выглядело как сбой озвучки
+            if text and tts.speakable(text):
                 session.last_spoken_text = text
                 path = os.path.join(tempfile.gettempdir(), f"speak_{uuid.uuid4().hex}.mp3")
                 await tts.synthesize(text, path, session.voice_key)

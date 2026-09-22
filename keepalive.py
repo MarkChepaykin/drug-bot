@@ -5,7 +5,7 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "v47"
+VERSION = "v48"
 status = "starting"
 
 # Хуки для событий войса (ставит bot.py). Вызываются из потока HTTP-сервера.
@@ -16,7 +16,13 @@ on_bot_speaking = None
 
 
 def full_status() -> str:
-    return f"{status} {VERSION}"
+    # расход токенов Groq за сегодня: суточный лимит выбивается за один вечер в войсе,
+    # и без этой строчки о нём узнаёшь только по внезапно замолчавшему боту
+    try:
+        from services import llm
+        return f"{status} {VERSION} | токены: {llm.usage_line()}"
+    except Exception:
+        return f"{status} {VERSION}"
 
 
 class _Handler(BaseHTTPRequestHandler):
